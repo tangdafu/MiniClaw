@@ -1,0 +1,15 @@
+[project]
+name = "miniclaw-backend"
+version = "0.1.0"
+description = "MiniClaw Agent 后端 - 支持工具调用的 AI Agent"
+readme = "README.md"
+requires-python = ">=3.10"
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+dependencies = [
+    "fastapi",
+    "openai",
+    "pydantic",
+    "python-dotenv",
+    "uvicorn",
+    "websockets>=16.0",
+]
