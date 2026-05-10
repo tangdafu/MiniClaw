@@ -50,6 +50,58 @@ class SkillManager:
 
         return "\n".join(lines)
 
+    def read_skill(self, skill_name: str, file_path: str = "SKILL.md") -> str:
+        """
+        读取指定 skill 目录下的文件内容。
+        默认读取 SKILL.md，也可以读取 skill 目录下的其他文件（如 references/create.md、agents/grader.md 等）。
+        """
+        if not self.skills_dir.exists():
+            return "[错误] skills 目录不存在"
+
+        # 按名称查找 skill 目录
+        for item in self.skills_dir.iterdir():
+            if item.is_dir() and not item.name.startswith('.'):
+                skill_md = item / "SKILL.md"
+                if skill_md.exists():
+                    meta = self._parse_frontmatter(skill_md)
+                    if meta and meta.get("name") == skill_name:
+                        target_file = item / file_path
+                        # 安全检查：确保文件在 skill 目录内
+                        try:
+                            target_file.resolve().relative_to(item.resolve())
+                        except ValueError:
+                            return "[错误] 文件路径不合法"
+
+                        if not target_file.exists():
+                            return f"[错误] 文件不存在: {file_path}"
+
+                        try:
+                            return target_file.read_text(encoding="utf-8")
+                        except Exception as e:
+                            return f"[错误] 读取文件失败: {e}"
+
+        return f"[错误] 未找到 skill: {skill_name}"
+
+    def list_skill_files(self, skill_name: str) -> str:
+        """列出指定 skill 目录下的所有文件结构"""
+        if not self.skills_dir.exists():
+            return "[错误] skills 目录不存在"
+
+        for item in self.skills_dir.iterdir():
+            if item.is_dir() and not item.name.startswith('.'):
+                skill_md = item / "SKILL.md"
+                if skill_md.exists():
+                    meta = self._parse_frontmatter(skill_md)
+                    if meta and meta.get("name") == skill_name:
+                        lines = [f"{skill_name} 目录结构："]
+                        for f in item.rglob("*"):
+                            if f.is_file() and not f.name.startswith('.'):
+                                rel = f.relative_to(item)
+                                lines.append(f"  - {rel}")
+                        return "\n".join(lines)
+
+        return f"[错误] 未找到 skill: {skill_name}"
+
     @staticmethod
     def _parse_frontmatter(skill_md_path: Path) -> dict | None:
         """只解析 SKILL.md 的 frontmatter"""
@@ -115,8 +167,42 @@ def get_tools(skills_dir: Path | str | None = None) -> list[Tool]:
             handler=skill_manager.read_skill_list,
         ),
         Tool(
+            name="read_skill",
+            description="读取指定 skill 目录下的文件内容。默认读取 SKILL.md，也可以读取 skill 目录下的其他文件（如 references/create.md、agents/grader.md、scripts/utils.py 等）。当大模型通过 read_skill_list 选定某个 skill 后，使用此工具读取该 skill 的完整指令和规则。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "skill 的名称（从 read_skill_list 返回的 name 字段）"
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "相对于 skill 目录的文件路径，默认 SKILL.md。例如：references/create.md、agents/grader.md、scripts/utils.py"
+                    }
+                },
+                "required": ["skill_name"]
+            },
+            handler=skill_manager.read_skill,
+        ),
+        Tool(
+            name="list_skill_files",
+            description="列出指定 skill 目录下的所有文件结构。当需要了解某个 skill 包含哪些子文件（references、agents、scripts 等）时使用。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "skill 的名称（从 read_skill_list 返回的 name 字段）"
+                    }
+                },
+                "required": ["skill_name"]
+            },
+            handler=skill_manager.list_skill_files,
+        ),
+        Tool(
             name="execute_command",
-            description="在本地终端执行一条命令并返回输出结果。可用于运行代码、查看文件、安装包、读取 skill 文件等。当需要读取某个 skill 的完整 SKILL.md 文件时，使用 cat/type 命令读取。",
+            description="在本地终端执行一条命令并返回输出结果。可用于运行代码、查看文件、安装包等。",
             parameters={
                 "type": "object",
                 "properties": {

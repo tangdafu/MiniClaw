@@ -12,8 +12,9 @@ env_path = Path(__file__).parent / ".env"
 if env_path.exists():
     load_dotenv(dotenv_path=env_path)
 
-from miniclaw import Agent, Tool
-from miniclaw.agent import AgentConfig
+from miniclaw import Tool
+from miniclaw.agent import Agent, AgentConfig
+from miniclaw.claw import Claw
 from tools import get_tools
 
 # 配置日志
@@ -24,38 +25,43 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Agent 单例（由 lifespan 管理生命周期）
-_agent: Agent | None = None
+# 全局实例（由 lifespan 管理）
+_claw: Claw | None = None
 
 
-def get_agent() -> Agent:
-    """获取 Agent 实例（FastAPI 依赖）"""
-    if _agent is None:
-        raise RuntimeError("Agent not initialized")
-    return _agent
+def get_claw() -> Claw:
+    """获取 Claw 实例（FastAPI 依赖）"""
+    if _claw is None:
+        raise RuntimeError("Claw not initialized")
+    return _claw
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    global _agent
+    global _claw
 
-    logger.info("Initializing Agent...")
+    logger.info("Initializing Claw...")
+
+    # 初始化 Agent
     config = AgentConfig(
         model=os.getenv("OPENAI_MODEL", "gpt-4o"),
     )
-    _agent = Agent(config=config, tools=get_tools())
-    logger.info("Agent initialized with %d tools", len(_agent.tools))
+    agent = Agent(config=config, tools=get_tools())
+
+    # 初始化 Claw（编排层）
+    _claw = Claw(agent=agent)
+    logger.info("Claw initialized with %d tools", len(agent.tools))
 
     yield
 
     logger.info("Shutting down...")
-    _agent = None
+    _claw = None
 
 
 app = FastAPI(
     title="MiniClaw Agent",
-    version="2.0.0",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
@@ -71,16 +77,28 @@ app.add_middleware(
 @app.websocket("/ws/chat")
 async def websocket_chat(
     websocket: WebSocket,
-    agent: Agent = Depends(get_agent),
+    claw: Claw = Depends(get_claw),
 ):
+    """
+    WebSocket 聊天接口
+
+    接收: { session_id, message }
+    返回: Event 流
+    """
     await websocket.accept()
     try:
         while True:
             data = await websocket.receive_json()
-            messages = data.get("messages", [])
+            session_id = data.get("session_id", "")
+            user_message = data.get("message", "").strip()
 
-            async for event in agent.chat(messages):
+            if not user_message:
+                continue
+
+            # 调用 Claw 完成对话（上下文管理 + Agent 调用）
+            async for event in claw.chat(session_id, user_message):
                 await websocket.send_json(event.model_dump(exclude_none=True))
+
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
     except Exception as e:
@@ -93,8 +111,8 @@ async def websocket_chat(
 async def health():
     return {
         "status": "ok",
-        "agent_ready": _agent is not None,
-        "tools_count": len(_agent.tools) if _agent else 0,
+        "claw_ready": _claw is not None,
+        "tools_count": len(_claw.agent.tools) if _claw else 0,
     }
 
 

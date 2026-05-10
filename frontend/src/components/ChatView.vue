@@ -26,12 +26,9 @@
 
           <!-- AI 消息 -->
           <template v-else>
-            <!-- 思考内容（可折叠） -->
+            <!-- 1. 思考内容（可折叠） -->
             <div v-if="msg.reasoning" class="reasoning-section">
-              <button
-                class="reasoning-toggle"
-                @click="toggleReasoning(index)"
-              >
+              <button class="reasoning-toggle" @click="toggleReasoning(index)">
                 <span class="toggle-icon">{{ msg.showReasoning ? '▼' : '▶' }}</span>
                 <span class="toggle-text">
                   {{ msg.showReasoning ? '隐藏思考过程' : '显示思考过程' }}
@@ -43,31 +40,40 @@
               </div>
             </div>
 
-            <!-- 正文内容 -->
-            <div class="text" v-html="renderMarkdown(msg.content)"></div>
+            <!-- 2. 工具执行和执行结果（成对显示，默认折叠） -->
+            <div v-if="msg.toolPairs && msg.toolPairs.length > 0" class="tools-section">
+              <button class="tools-toggle" @click="toggleTools(index)">
+                <span class="toggle-icon">{{ msg.showTools ? '▼' : '▶' }}</span>
+                <span class="toggle-text">
+                  {{ msg.showTools ? '隐藏工具执行' : '显示工具执行' }}
+                </span>
+                <span class="tools-badge">{{ msg.toolPairs.length }} 个工具</span>
+              </button>
+              <div v-show="msg.showTools" class="tools-content">
+                <div v-for="(pair, i) in msg.toolPairs" :key="i" class="tool-pair">
+                  <!-- 工具调用 -->
+                  <div class="tool-call">
+                    <div class="tool-header">
+                      <span class="tool-icon">🔧</span>
+                      <span class="tool-name">{{ pair.call.name }}</span>
+                    </div>
+                    <div class="tool-args">{{ pair.call.arguments }}</div>
+                  </div>
+                  <!-- 工具结果 -->
+                  <div class="tool-result">
+                    <div class="tool-header">
+                      <span class="tool-icon">📤</span>
+                      <span class="tool-name">{{ pair.call.name }} 结果</span>
+                    </div>
+                    <pre class="tool-output">{{ pair.result }}</pre>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 3. 返回的具体内容 -->
+            <div v-if="msg.content" class="text" v-html="renderMarkdown(msg.content)"></div>
           </template>
-
-          <!-- Tool calls -->
-          <div v-if="msg.toolCalls && msg.toolCalls.length > 0" class="tool-calls">
-            <div v-for="(tc, i) in msg.toolCalls" :key="i" class="tool-call">
-              <div class="tool-header">
-                <span class="tool-icon">🔧</span>
-                <span class="tool-name">{{ tc.name }}</span>
-              </div>
-              <div class="tool-args">{{ tc.arguments }}</div>
-            </div>
-          </div>
-
-          <!-- Tool results -->
-          <div v-if="msg.toolResults && msg.toolResults.length > 0" class="tool-results">
-            <div v-for="(tr, i) in msg.toolResults" :key="i" class="tool-result">
-              <div class="tool-header">
-                <span class="tool-icon">📤</span>
-                <span class="tool-name">{{ tr.name }} 结果</span>
-              </div>
-              <pre class="tool-output">{{ tr.result }}</pre>
-            </div>
-          </div>
         </div>
       </div>
 
@@ -90,8 +96,13 @@
           rows="1"
           ref="inputRef"
         ></textarea>
-        <button @click="sendMessage" :disabled="isLoading || !inputText.trim() || !isConnected">
-          {{ isConnected ? '发送' : '连接中...' }}
+        <button 
+          @click="sendMessage" 
+          :disabled="isProcessing || !inputText.trim() || !isConnected"
+          class="send-btn"
+        >
+          <span v-if="isProcessing" class="spinner"></span>
+          <span v-else>{{ isConnected ? '发送' : '连接中...' }}</span>
         </button>
       </div>
     </div>
@@ -107,8 +118,8 @@ interface ToolCall {
   arguments: string
 }
 
-interface ToolResult {
-  name: string
+interface ToolPair {
+  call: ToolCall
   result: string
 }
 
@@ -117,9 +128,9 @@ interface Message {
   content: string
   reasoning?: string
   showReasoning?: boolean
+  toolPairs?: ToolPair[]
+  showTools?: boolean
   isError?: boolean
-  toolCalls?: ToolCall[]
-  toolResults?: ToolResult[]
 }
 
 const messages = ref<Message[]>([
@@ -131,10 +142,12 @@ const messages = ref<Message[]>([
 
 const inputText = ref('')
 const isLoading = ref(false)
+const isProcessing = ref(false)
 const isConnected = ref(false)
 const globalError = ref('')
 const messagesRef = ref<HTMLDivElement>()
 const inputRef = ref<HTMLTextAreaElement>()
+const sessionId = ref('')  // 当前会话 ID
 
 let ws: WebSocket | null = null
 
@@ -152,6 +165,11 @@ function connectWebSocket() {
   ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)
+      // 处理 session_created 事件
+      if (data.type === 'session_created') {
+        sessionId.value = data.session_id
+        return
+      }
       handleEvent(data)
     } catch {
       // ignore parse errors
@@ -189,34 +207,34 @@ function toggleReasoning(index: number) {
   }
 }
 
+function toggleTools(index: number) {
+  const msg = messages.value[index]
+  if (msg) {
+    msg.showTools = !msg.showTools
+  }
+}
+
 function handleEnter(e: KeyboardEvent) {
-  if (!e.shiftKey) {
+  if (!e.shiftKey && !isProcessing.value) {
     sendMessage()
   }
 }
 
 function sendMessage() {
   const text = inputText.value.trim()
-  if (!text || isLoading.value || !ws || ws.readyState !== WebSocket.OPEN) return
+  if (!text || isProcessing.value || !ws || ws.readyState !== WebSocket.OPEN) return
 
   // 清除之前的错误
   globalError.value = ''
 
-  // Add user message
+  // 显示用户消息到界面
   messages.value.push({ role: 'user', content: text })
   inputText.value = ''
   isLoading.value = true
+  isProcessing.value = true
   scrollToBottom()
 
-  // Build API messages
-  const apiMessages = messages.value
-    .filter(m => !m.isError)
-    .map(m => ({
-      role: m.role,
-      content: m.content
-    }))
-
-  // Create assistant message placeholder
+  // 创建 assistant 消息占位
   const assistantMsg: Message = {
     role: 'assistant',
     content: ''
@@ -224,58 +242,66 @@ function sendMessage() {
   messages.value.push(assistantMsg)
   isLoading.value = false
 
-  // Send via WebSocket
-  ws.send(JSON.stringify({ messages: apiMessages }))
+  // 发送：只传 session_id 和最新 message
+  ws.send(JSON.stringify({
+    session_id: sessionId.value,
+    message: text
+  }))
 }
 
+// 临时存储当前消息的工具调用，等待结果配对
+let pendingToolCall: ToolCall | null = null
+
 function handleEvent(event: any) {
+  const lastMsg = messages.value[messages.value.length - 1]
+  if (lastMsg.role !== 'assistant' || lastMsg.isError) return
+
   switch (event.type) {
-    case 'text': {
-      const lastMsg = messages.value[messages.value.length - 1]
-      if (lastMsg.role === 'assistant' && !lastMsg.isError) {
-        lastMsg.content += event.content
-        scrollToBottom()
-      }
+    case 'text':
+      lastMsg.content += event.content
+      scrollToBottom()
       break
-    }
-    case 'reasoning': {
-      const lastMsg = messages.value[messages.value.length - 1]
-      if (lastMsg.role === 'assistant' && !lastMsg.isError) {
-        if (!lastMsg.reasoning) {
-          lastMsg.reasoning = ''
-          lastMsg.showReasoning = true
+
+    case 'reasoning':
+      if (!lastMsg.reasoning) {
+        lastMsg.reasoning = ''
+        lastMsg.showReasoning = false  // 默认折叠
+      }
+      lastMsg.reasoning += event.content
+      scrollToBottom()
+      break
+
+    case 'tool_call':
+      // 存储待配对的 tool_call
+      pendingToolCall = {
+        name: event.name,
+        arguments: event.arguments
+      }
+      scrollToBottom()
+      break
+
+    case 'tool_result':
+      // 与 pendingToolCall 配对
+      if (pendingToolCall) {
+        if (!lastMsg.toolPairs) {
+          lastMsg.toolPairs = []
+          lastMsg.showTools = false  // 默认折叠
         }
-        lastMsg.reasoning += event.content
-        scrollToBottom()
-      }
-      break
-    }
-    case 'tool_call': {
-      const lastMsg = messages.value[messages.value.length - 1]
-      if (lastMsg.role === 'assistant' && !lastMsg.isError) {
-        if (!lastMsg.toolCalls) lastMsg.toolCalls = []
-        lastMsg.toolCalls.push({
-          name: event.name,
-          arguments: event.arguments
-        })
-        scrollToBottom()
-      }
-      break
-    }
-    case 'tool_result': {
-      const lastMsg = messages.value[messages.value.length - 1]
-      if (lastMsg.role === 'assistant' && !lastMsg.isError) {
-        if (!lastMsg.toolResults) lastMsg.toolResults = []
-        lastMsg.toolResults.push({
-          name: event.name,
+        lastMsg.toolPairs.push({
+          call: pendingToolCall,
           result: event.result
         })
+        pendingToolCall = null
         scrollToBottom()
       }
       break
-    }
+
     case 'done':
+      // 清理未配对的 tool_call
+      pendingToolCall = null
+      isProcessing.value = false  // 处理完成
       break
+
     case 'error':
       // 错误作为独立消息显示（红色）
       messages.value.push({
@@ -283,6 +309,8 @@ function handleEvent(event: any) {
         content: event.error || event.message || '未知错误',
         isError: true
       })
+      pendingToolCall = null
+      isProcessing.value = false  // 处理完成（出错）
       scrollToBottom()
       break
   }
@@ -492,15 +520,55 @@ onUnmounted(() => {
   word-break: break-all;
 }
 
-.tool-calls, .tool-results {
-  margin-top: 12px;
+/* 工具区域折叠 - 紧凑模式 */
+.tools-section {
+  margin-bottom: 8px;
+}
+
+.tools-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: #f0f5ff;
+  border: 1px solid #d6e4ff;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  color: #2f54eb;
+  line-height: 1.4;
+  transition: background 0.2s;
+}
+
+.tools-toggle:hover {
+  background: #d6e4ff;
+}
+
+.tools-badge {
+  font-size: 11px;
+  color: #2f54eb;
+  opacity: 0.8;
+}
+
+.tools-content {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: #f8f9fa;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tool-pair {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
 .tool-call, .tool-result {
-  background: #f8f9fa;
+  background: #fff;
   border: 1px solid #e0e0e0;
   border-radius: 8px;
   padding: 10px 12px;
@@ -535,9 +603,9 @@ onUnmounted(() => {
   font-family: monospace;
   white-space: pre-wrap;
   word-break: break-all;
-  max-height: 200px;
+  max-height: 300px;
   overflow-y: auto;
-  background: #fff;
+  background: #f4f4f4;
   padding: 8px;
   border-radius: 4px;
   margin: 0;
@@ -581,6 +649,11 @@ onUnmounted(() => {
   font-size: 15px;
   cursor: pointer;
   transition: background 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 80px;
+  height: 44px;
 }
 
 .input-box button:hover:not(:disabled) {
@@ -590,6 +663,21 @@ onUnmounted(() => {
 .input-box button:disabled {
   background: #ccc;
   cursor: not-allowed;
+}
+
+/* 加载动画 */
+.spinner {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border: 2px solid #fff;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .typing-indicator {

@@ -45,7 +45,7 @@ class Tool(BaseModel):
 
 class Event(BaseModel):
     """Agent 流式事件"""
-    type: Literal["text", "reasoning", "tool_call", "tool_result", "done", "error"]
+    type: Literal["text", "reasoning", "tool_call", "tool_result", "done", "error", "session_created"]
     content: str = ""
     name: str = ""           # 工具名称
     arguments: str = ""      # 工具参数
@@ -75,6 +75,10 @@ class Event(BaseModel):
     @staticmethod
     def error(message: str) -> "Event":
         return Event(type="error", error_msg=message)
+
+    @staticmethod
+    def session_created(session_id: str) -> "Event":
+        return Event(type="session_created", content=session_id)
 
     def model_dump(self, **kwargs) -> dict:
         """自定义序列化，将 error_msg 映射为 error 键"""
