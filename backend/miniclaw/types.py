@@ -19,7 +19,8 @@ class Message(BaseModel):
             d["tool_call_id"] = self.tool_call_id
         if self.tool_calls:
             d["tool_calls"] = self.tool_calls
-        if self.reasoning_content is not None:
+        # 只在有实际内容时才发送 reasoning_content，避免部分 API 报错
+        if self.reasoning_content:
             d["reasoning_content"] = self.reasoning_content
         return d
 
@@ -51,6 +52,7 @@ class Event(BaseModel):
     arguments: str = ""      # 工具参数
     result: str = ""         # 工具结果
     error_msg: str = ""      # 错误信息（字段名避免和静态方法冲突）
+    session_id: str = ""     # 会话 ID（用于 session_created 事件）
 
     @staticmethod
     def text(content: str) -> "Event":
@@ -78,7 +80,7 @@ class Event(BaseModel):
 
     @staticmethod
     def session_created(session_id: str) -> "Event":
-        return Event(type="session_created", content=session_id)
+        return Event(type="session_created", session_id=session_id)
 
     def model_dump(self, **kwargs) -> dict:
         """自定义序列化，将 error_msg 映射为 error 键"""

@@ -4,10 +4,10 @@ import json
 import logging
 import uuid
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import AsyncIterator
 
-from .types import Tool, Event
-from .agent import Agent, AgentConfig
+from .types import Event
+from .agent import Agent
 
 logger = logging.getLogger(__name__)
 
@@ -71,14 +71,13 @@ class SessionManager:
 
 class Claw:
     """
-    MiniClaw Claw — 上下文管理与 Agent 编排
+    MiniClaw Claw — 会话生命周期管理与 Agent 编排
 
     职责：
-    1. 管理会话上下文（创建、读取、保存）
-    2. 接收用户消息，拼接历史
-    3. 调用 Agent 进行对话
-    4. 保存对话结果
-    5. 流式返回 Event
+    1. 管理会话生命周期（创建、验证）
+    2. 加载/保存会话历史（委托 SessionManager）
+    3. 调用 Agent 进行对话（Agent 负责消息拼接与工具调用循环）
+    4. 流式返回 Event
 
     使用示例：
         claw = Claw(agent=agent, session_manager=session_manager)
@@ -96,7 +95,7 @@ class Claw:
 
     async def chat(self, session_id: str, user_message: str) -> AsyncIterator[Event]:
         """
-        对话入口 — 管理上下文 + 调用 Agent
+        对话入口 — 管理会话生命周期，委托 Agent 处理对话逻辑
 
         Args:
             session_id: 会话 ID
@@ -112,38 +111,14 @@ class Claw:
 
         logger.info("Session %s: user message received", session_id)
 
-        # 加载历史消息
+        # 加载历史消息（Agent 会原地修改此列表）
         messages = self.session_manager.load_messages(session_id)
 
-        # 追加用户消息
-        user_msg = {"role": "user", "content": user_message}
-        messages.append(user_msg)
-        self.session_manager.save_messages(session_id, messages)
-
-        # 调用 Agent（传入完整历史）
-        assistant_content = ""
-        assistant_reasoning = ""
-
-        async for event in self.agent.chat(messages):
+        # 调用 Agent（Agent 负责追加 user_message、assistant、tool 消息）
+        async for event in self.agent.chat(messages, user_message):
             yield event
 
-            # 收集 assistant 回复内容
-            if event.type == "text":
-                assistant_content += event.content
-            elif event.type == "reasoning":
-                assistant_reasoning += event.content
-            elif event.type == "done":
-                # 保存 assistant 回复到会话
-                assistant_msg: dict[str, Any] = {
-                    "role": "assistant",
-                    "content": assistant_content
-                }
-                if assistant_reasoning:
-                    assistant_msg["reasoning_content"] = assistant_reasoning
-
-                messages.append(assistant_msg)
-                self.session_manager.save_messages(session_id, messages)
-                logger.info("Session %s: conversation saved", session_id)
-
-            elif event.type == "error":
-                logger.error("Session %s: error - %s", session_id, event.error)
+        # Agent 已完成对话循环，messages 已包含完整历史
+        # 保存更新后的消息列表
+        self.session_manager.save_messages(session_id, messages)
+        logger.info("Session %s: conversation saved", session_id)

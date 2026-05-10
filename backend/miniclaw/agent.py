@@ -87,11 +87,17 @@ class Agent:
         self.tool_map: dict[str, Tool] = {t.name: t for t in self.tools}
 
     def _build_messages(self, messages: list[dict]) -> list[dict]:
-        """构建消息列表，注入系统提示"""
+        """构建消息列表，注入系统提示，并清理 API 不兼容字段"""
         result = []
         if self.system_prompt:
             result.append({"role": "system", "content": self.system_prompt})
-        result.extend(messages)
+        for msg in messages:
+            # 复制消息，避免修改原始历史
+            clean_msg = dict(msg)
+            # 移除空的 reasoning_content，避免部分 OpenAI 兼容 API 报错
+            if clean_msg.get("reasoning_content") == "":
+                clean_msg.pop("reasoning_content", None)
+            result.append(clean_msg)
         return result
 
     def _get_tool_schemas(self) -> list[dict] | None:
@@ -115,22 +121,34 @@ class Agent:
             logger.exception("Tool execution failed: %s", tool_name)
             return f"[错误] 执行工具失败: {e}"
 
-    async def chat(self, messages: list[dict]) -> AsyncIterator[Event]:
+    async def chat(self, messages: list[dict], user_message: str) -> AsyncIterator[Event]:
         """
         Agent Loop — 流式对话，自动处理工具调用
 
+        职责：
+        1. 将 user_message 追加到 messages（原地修改）
+        2. 与 LLM 进行多轮对话，自动执行工具
+        3. 将 assistant 消息（含 tool_calls）和 tool 结果追加到 messages
+        4. 返回 Event 流
+
         Args:
-            messages: 完整对话历史 [{"role": "user", "content": "..."}, ...]
+            messages: 当前会话历史列表（会被原地修改，调用结束后包含完整历史）
+            user_message: 用户最新输入
 
         Yields:
             Event: 流式事件
         """
-        current_messages = self._build_messages(messages)
+        # 追加用户消息到历史
+        messages.append({"role": "user", "content": user_message})
+
         iteration = 0
 
         try:
             while iteration < self.max_iterations:
                 iteration += 1
+
+                # 构建给 LLM 的消息（注入 system_prompt，过滤不兼容字段）
+                current_messages = self._build_messages(messages)
 
                 response = await self.client.chat.completions.create(
                     model=self.model,
@@ -161,12 +179,12 @@ class Agent:
                         for tc in delta.tool_calls:
                             parser.feed(tc)
 
+                # 将 assistant 消息（含可能的 tool_calls）追加到原始历史
+                messages.append(assistant_message)
+
                 if not parser.has_tool_calls():
                     yield Event.done()
                     return
-
-                assistant_message["tool_calls"] = parser.get_tool_calls()
-                current_messages.append(assistant_message)
 
                 for tc in parser.get_tool_calls():
                     tool_name = tc["function"]["name"]
@@ -178,7 +196,8 @@ class Agent:
 
                     yield Event.tool_result(tool_name, result)
 
-                    current_messages.append({
+                    # 将 tool 结果追加到原始历史
+                    messages.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],
                         "content": result,
