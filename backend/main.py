@@ -4,7 +4,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 # 显式加载 .env
@@ -15,6 +15,12 @@ if env_path.exists():
 from miniclaw import Tool
 from miniclaw.agent import Agent, AgentConfig
 from miniclaw.claw import Claw
+from miniclaw.session_history import (
+    PaginatedMessagesResponse,
+    SessionCreateResponse,
+    SessionListResponse,
+)
+from miniclaw.system_prompt import build_default_system_prompt
 from tools import get_tools
 
 # 配置日志
@@ -44,8 +50,16 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing Claw...")
 
     # 初始化 Agent
+    backend_dir = Path(__file__).parent
+    workspace_root = backend_dir.parent
     config = AgentConfig(
         model=os.getenv("OPENAI_MODEL", "gpt-4o"),
+        system_prompt=build_default_system_prompt(
+            workspace_root=workspace_root,
+            backend_dir=backend_dir,
+            frontend_dir=workspace_root / "frontend",
+            skills_dir=backend_dir / "skills",
+        ),
     )
     agent = Agent(config=config, tools=get_tools())
 
@@ -114,6 +128,35 @@ async def health():
         "claw_ready": _claw is not None,
         "tools_count": len(_claw.agent.tools) if _claw else 0,
     }
+
+
+@app.post("/sessions", response_model=SessionCreateResponse)
+async def create_session(claw: Claw = Depends(get_claw)):
+    return SessionCreateResponse(session_id=claw.create_session())
+
+
+@app.get("/sessions", response_model=SessionListResponse)
+async def list_sessions(claw: Claw = Depends(get_claw)):
+    return SessionListResponse(sessions=claw.list_sessions())
+
+
+@app.get("/sessions/{session_id}/messages", response_model=PaginatedMessagesResponse)
+async def get_session_messages(
+    session_id: str,
+    before: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    claw: Claw = Depends(get_claw),
+):
+    if not claw.session_manager.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    return claw.get_messages_page(session_id, before=before, limit=limit)
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str, claw: Claw = Depends(get_claw)):
+    if not claw.delete_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"deleted": True, "session_id": session_id}
 
 
 if __name__ == "__main__":

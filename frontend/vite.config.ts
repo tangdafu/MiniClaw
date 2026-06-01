@@ -12,6 +12,7 @@ export default defineConfig({
         changeOrigin: true,
       },
       '/health': 'http://localhost:8000',
+      '/sessions': 'http://localhost:8000',
     }
   }
 })

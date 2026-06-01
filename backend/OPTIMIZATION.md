@@ -4,6 +4,39 @@
 > 审查范围：`backend/` 全部核心代码
 > 重点需求：长期记忆与短期记忆架构设计
 
+> 当前状态更新：2026-05-31
+> 后端已经完成 `refactor-react-runtime` 和 `refactor-tool-system` 重构：`Agent` 变为门面，真实 ReAct 循环迁移到 `ReactRuntime`，并新增 `ReactContext`、`StreamAccumulator`、`ToolExecutor`、`HookManager` 等内部组件；内置工具也从单体 `tools.py` 拆分到 `miniclaw.tools`，新增 `SkillRepository` 和 `CommandRunner`。本文保留原始审查内容作为历史记录；下方“状态更新”说明哪些问题已经解决或缓解。
+
+---
+
+## 状态更新：Runtime 重构后的变化
+
+### 已解决或显著缓解
+
+| 原问题 | 当前状态 |
+|--------|----------|
+| 1. Claw 保存的 assistant 消息缺失 `tool_calls` | 已解决。`ReactRuntime` 会把 assistant 消息追加到同一个 `messages` 列表；当模型请求工具时，assistant 消息包含重建后的 `tool_calls`，并且位于对应 `role: "tool"` 消息之前。`Claw` 在流结束后保存该完整列表。 |
+| 6. Claw 与 Agent 消息历史双轨维护 | 已显著缓解。当前只有一个由 `Claw` 加载、传给 `Agent.chat()`、再由 `ReactRuntime.run()` 原地修改的 `messages` 列表。 |
+| 14. Agent 达到最大迭代次数时消息丢失 | 已缓解。每轮模型流结束后，assistant 消息会立即追加到历史；工具结果也会在执行后追加。达到最大迭代次数时会输出提示并结束。 |
+| 工具调用解析和执行耦合在 Agent 内部 | 已解决。流式解析迁移到 `stream.py`，工具执行迁移到 `tool_executor.py`。 |
+| 缺少扩展点 | 已缓解。`hooks.py` 提供 run、message build、model call、assistant turn、tool call、save、error 等生命周期 hook。 |
+| 10. `SkillManager` 没有缓存，重复解析文件 | 已缓解。Skill 访问迁移到 `SkillRepository`，按 frontmatter name 建立索引并在同一个 repository 实例内复用。 |
+| 12. `read_skill` 路径安全检查写法绕 | 已改善。Skill 文件访问集中到 `SkillRepository.read_skill()`，使用 resolved path 的目录内检查。 |
+
+### 仍需处理
+
+| 原问题 | 当前状态 |
+|--------|----------|
+| 2. 没有上下文窗口管理 | 仍待处理。当前仍会把完整历史发给模型，没有 token 预算、截断或摘要。 |
+| 3. `reasoning_content` 兼容性问题 | 部分缓解。空字符串会在发给模型前移除，但非空 `reasoning_content` 仍可能进入后续请求。是否需要按模型能力剥离仍待设计。 |
+| 4. `SessionManager` 同步 IO | 仍待处理。会话读写仍是同步文件 IO。 |
+| 5. 缺乏长期/短期记忆分层 | 仍待处理。Runtime hook 已提供未来接入点，但尚未实现 Memory 层。 |
+| 7. `Event` 类型混合不同层事件 | 仍待处理。`session_created` 仍和 Agent 事件共用同一个 `Event` 类型。 |
+| 8. `SessionManager` 生产能力不足 | 仍待处理。仍无文件锁、事务、索引和分页。 |
+| 9. `execute_command` 安全风险 | 仍待处理。命令执行已迁移到 `CommandRunner` 并预留 `validate()` 策略 seam，但仍使用 `shell=True`，缺少确认、白名单或沙箱。 |
+| 11. `SkillManager._parse_frontmatter` 解析过于简陋 | 仍待处理。当前仍是轻量 frontmatter 解析，不是完整 YAML 解析器。 |
+| 13、15-17 | 多数仍待处理，详见原始条目。 |
+
 ---
 
 ## 一、严重缺陷（必须修复）

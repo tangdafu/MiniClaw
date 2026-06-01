@@ -2,12 +2,20 @@
 
 import json
 import logging
+import shutil
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator
 
 from .types import Event
 from .agent import Agent
+from .session_history import (
+    PaginatedMessagesResponse,
+    SessionSummary,
+    paginate_display_messages,
+    present_messages,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +47,19 @@ class SessionManager:
     def session_exists(self, session_id: str) -> bool:
         return self.get_chat_file(session_id).exists()
 
+    def delete_session(self, session_id: str) -> bool:
+        """Delete a session directory if it exists."""
+        session_path = (self.sessions_dir / session_id).resolve()
+        sessions_root = self.sessions_dir.resolve()
+
+        if sessions_root != session_path and sessions_root not in session_path.parents:
+            raise ValueError("Session path escapes sessions directory")
+        if not self.session_exists(session_id):
+            return False
+
+        shutil.rmtree(session_path)
+        return True
+
     def load_messages(self, session_id: str) -> list[dict]:
         """加载会话历史消息"""
         chat_file = self.get_chat_file(session_id)
@@ -68,6 +89,50 @@ class SessionManager:
         messages.append(message)
         self.save_messages(session_id, messages)
 
+    def list_sessions(self) -> list[SessionSummary]:
+        """List sessions with derived summary metadata."""
+        sessions: list[SessionSummary] = []
+
+        for session_path in self.sessions_dir.iterdir():
+            if not session_path.is_dir():
+                continue
+            chat_file = session_path / "chat.json"
+            if not chat_file.exists():
+                continue
+
+            messages = self.load_messages(session_path.name)
+            display_messages = present_messages(messages)
+            stat = chat_file.stat()
+            sessions.append(
+                SessionSummary(
+                    session_id=session_path.name,
+                    title=self._session_title(messages),
+                    created_at=self._format_timestamp(getattr(stat, "st_ctime", stat.st_mtime)),
+                    updated_at=self._format_timestamp(stat.st_mtime),
+                    message_count=len(display_messages),
+                )
+            )
+
+        return sorted(sessions, key=lambda session: session.updated_at, reverse=True)
+
+    def get_messages_page(
+        self, session_id: str, before: int | None = None, limit: int = 20
+    ) -> PaginatedMessagesResponse:
+        messages = self.load_messages(session_id)
+        display_messages = present_messages(messages)
+        return paginate_display_messages(display_messages, before=before, limit=limit)
+
+    def _session_title(self, messages: list[dict]) -> str:
+        for message in messages:
+            if message.get("role") == "user":
+                content = str(message.get("content") or "").strip()
+                if content:
+                    return content[:40]
+        return "New chat"
+
+    def _format_timestamp(self, timestamp: float) -> str:
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
 
 class Claw:
     """
@@ -92,6 +157,17 @@ class Claw:
     def create_session(self) -> str:
         """创建新会话"""
         return self.session_manager.create_session()
+
+    def list_sessions(self) -> list[SessionSummary]:
+        return self.session_manager.list_sessions()
+
+    def delete_session(self, session_id: str) -> bool:
+        return self.session_manager.delete_session(session_id)
+
+    def get_messages_page(
+        self, session_id: str, before: int | None = None, limit: int = 20
+    ) -> PaginatedMessagesResponse:
+        return self.session_manager.get_messages_page(session_id, before=before, limit=limit)
 
     async def chat(self, session_id: str, user_message: str) -> AsyncIterator[Event]:
         """

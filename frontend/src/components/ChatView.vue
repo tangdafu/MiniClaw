@@ -1,155 +1,99 @@
 <template>
-  <div class="chat-container">
-    <!-- 全局错误提示 -->
-    <div v-if="globalError" class="global-error">
-      <span class="error-icon">⚠️</span>
-      <span class="error-text">{{ globalError }}</span>
-      <button class="error-close" @click="globalError = ''">✕</button>
-    </div>
+  <div class="chat-workspace">
+    <SessionSidebar
+      :sessions="sessions"
+      :active-session-id="sessionId"
+      :disabled="isProcessing"
+      :is-loading="isLoadingSessions"
+      @create="createNewSession"
+      @select="selectSession"
+      @delete="deleteSession"
+    />
 
-    <div class="messages" ref="messagesRef">
-      <div
-        v-for="(msg, index) in messages"
-        :key="index"
-        class="message"
-        :class="[msg.role, { error: msg.isError }]"
-      >
-        <div class="avatar">
-          {{ msg.role === 'user' ? '👤' : (msg.isError ? '⚠️' : '🤖') }}
+    <section class="chat-panel">
+      <header class="panel-header">
+        <div>
+          <p class="panel-kicker">Agent Workspace</p>
+          <h2>{{ activeTitle }}</h2>
         </div>
-        <div class="content">
-          <!-- 用户消息 -->
-          <div v-if="msg.role === 'user'" class="text">{{ msg.content }}</div>
-
-          <!-- 错误消息 -->
-          <div v-else-if="msg.isError" class="text error-text-content">{{ msg.content }}</div>
-
-          <!-- AI 消息 -->
-          <template v-else>
-            <!-- 1. 思考内容（可折叠） -->
-            <div v-if="msg.reasoning" class="reasoning-section">
-              <button class="reasoning-toggle" @click="toggleReasoning(index)">
-                <span class="toggle-icon">{{ msg.showReasoning ? '▼' : '▶' }}</span>
-                <span class="toggle-text">
-                  {{ msg.showReasoning ? '隐藏思考过程' : '显示思考过程' }}
-                </span>
-                <span class="reasoning-badge">{{ msg.reasoning.length }} 字</span>
-              </button>
-              <div v-show="msg.showReasoning" class="reasoning-content">
-                <pre>{{ msg.reasoning }}</pre>
-              </div>
-            </div>
-
-            <!-- 2. 工具执行和执行结果（成对显示，默认折叠） -->
-            <div v-if="msg.toolPairs && msg.toolPairs.length > 0" class="tools-section">
-              <button class="tools-toggle" @click="toggleTools(index)">
-                <span class="toggle-icon">{{ msg.showTools ? '▼' : '▶' }}</span>
-                <span class="toggle-text">
-                  {{ msg.showTools ? '隐藏工具执行' : '显示工具执行' }}
-                </span>
-                <span class="tools-badge">{{ msg.toolPairs.length }} 个工具</span>
-              </button>
-              <div v-show="msg.showTools" class="tools-content">
-                <div v-for="(pair, i) in msg.toolPairs" :key="i" class="tool-pair">
-                  <!-- 工具调用 -->
-                  <div class="tool-call">
-                    <div class="tool-header">
-                      <span class="tool-icon">🔧</span>
-                      <span class="tool-name">{{ pair.call.name }}</span>
-                    </div>
-                    <div class="tool-args">{{ pair.call.arguments }}</div>
-                  </div>
-                  <!-- 工具结果 -->
-                  <div class="tool-result">
-                    <div class="tool-header">
-                      <span class="tool-icon">📤</span>
-                      <span class="tool-name">{{ pair.call.name }} 结果</span>
-                    </div>
-                    <pre class="tool-output">{{ pair.result }}</pre>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <!-- 3. 返回的具体内容 -->
-            <div v-if="msg.content" class="text" v-html="renderMarkdown(msg.content)"></div>
-          </template>
+        <div class="connection-pill" :class="{ connected: isConnected }">
+          <span></span>
+          {{ isConnected ? '已连接' : '连接中' }}
         </div>
+      </header>
+
+      <div v-if="globalError" class="global-error">
+        <strong>出现问题</strong>
+        <span>{{ globalError }}</span>
+        <button @click="globalError = ''">关闭</button>
       </div>
 
-      <div v-if="isLoading" class="message assistant loading">
-        <div class="avatar">🤖</div>
-        <div class="content">
-          <div class="typing-indicator">
-            <span></span><span></span><span></span>
-          </div>
-        </div>
-      </div>
-    </div>
+      <MessageList
+        ref="messageListRef"
+        :messages="messages"
+        :is-loading-history="isLoadingHistory"
+        :has-more="hasMore"
+        :is-generating="isProcessing"
+        @load-older="loadOlderMessages"
+      />
 
-    <div class="input-area">
-      <div class="input-box">
-        <textarea
-          v-model="inputText"
-          @keydown.enter.prevent="handleEnter"
-          placeholder="输入消息...（Shift+Enter 换行）"
-          rows="1"
-          ref="inputRef"
-        ></textarea>
-        <button 
-          @click="sendMessage" 
-          :disabled="isProcessing || !inputText.trim() || !isConnected"
-          class="send-btn"
-        >
-          <span v-if="isProcessing" class="spinner"></span>
-          <span v-else>{{ isConnected ? '发送' : '连接中...' }}</span>
-        </button>
-      </div>
+      <ChatInput
+        ref="chatInputRef"
+        v-model="inputText"
+        :disabled="isProcessing || !isConnected || !sessionId"
+        :is-processing="isProcessing"
+        placeholder="向 MiniClaw 提问，或描述你想完成的任务..."
+        @send="sendMessage"
+      />
+    </section>
+
+    <div v-if="deleteTarget" class="modal-backdrop" @click="cancelDelete">
+      <section class="delete-modal" role="dialog" aria-modal="true" aria-labelledby="delete-title" @click.stop>
+        <div class="delete-icon">删</div>
+        <div class="delete-copy">
+          <p class="modal-kicker">危险操作</p>
+          <h3 id="delete-title">删除这个会话？</h3>
+          <p class="delete-session-name">{{ deleteTarget.title }}</p>
+          <p class="delete-description">删除后，该会话里的聊天记录会被永久移除，当前版本无法恢复。</p>
+        </div>
+        <div class="modal-actions">
+          <button class="secondary-action" @click="cancelDelete">取消</button>
+          <button class="danger-action" @click="confirmDeleteSession">删除</button>
+        </div>
+      </section>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, nextTick, onMounted, onUnmounted } from 'vue'
-import { marked } from 'marked'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import ChatInput from './ChatInput.vue'
+import MessageList from './MessageList.vue'
+import SessionSidebar from './SessionSidebar.vue'
+import type { Message, MessagePage, SessionSummary, StreamEvent, ToolCall } from '../types/chat'
 
-interface ToolCall {
-  name: string
-  arguments: string
-}
-
-interface ToolPair {
-  call: ToolCall
-  result: string
-}
-
-interface Message {
-  role: 'user' | 'assistant'
-  content: string
-  reasoning?: string
-  showReasoning?: boolean
-  toolPairs?: ToolPair[]
-  showTools?: boolean
-  isError?: boolean
-}
-
-const messages = ref<Message[]>([
-  {
-    role: 'assistant',
-    content: '你好！我是 MiniClaw Agent。我可以帮你执行命令、读取 skill 文件等。有什么可以帮你的吗？'
-  }
-])
-
+const messages = ref<Message[]>([])
+const sessions = ref<SessionSummary[]>([])
 const inputText = ref('')
-const isLoading = ref(false)
 const isProcessing = ref(false)
 const isConnected = ref(false)
+const isLoadingSessions = ref(false)
+const isLoadingHistory = ref(false)
+const hasMore = ref(false)
+const nextBefore = ref<number | null>(null)
 const globalError = ref('')
-const messagesRef = ref<HTMLDivElement>()
-const inputRef = ref<HTMLTextAreaElement>()
-const sessionId = ref('')  // 当前会话 ID
+const sessionId = ref('')
+const messageListRef = ref<InstanceType<typeof MessageList>>()
+const chatInputRef = ref<InstanceType<typeof ChatInput>>()
+const deleteTarget = ref<SessionSummary | null>(null)
 
 let ws: WebSocket | null = null
+let pendingToolCall: ToolCall | null = null
+let shouldReconnect = true
+
+const activeTitle = computed(() => {
+  return sessions.value.find((session) => session.session_id === sessionId.value)?.title || '新会话'
+})
 
 function connectWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -164,166 +108,269 @@ function connectWebSocket() {
 
   ws.onmessage = (event) => {
     try {
-      const data = JSON.parse(event.data)
-      // 处理 session_created 事件
-      if (data.type === 'session_created') {
+      const data = JSON.parse(event.data) as StreamEvent
+      if (data.type === 'session_created' && data.session_id) {
         sessionId.value = data.session_id
+        void loadSessions()
         return
       }
       handleEvent(data)
     } catch {
-      // ignore parse errors
+      // Ignore malformed stream events.
     }
   }
 
   ws.onclose = () => {
     isConnected.value = false
-    globalError.value = '连接已断开，正在重连...'
-    setTimeout(connectWebSocket, 3000)
+    if (shouldReconnect) {
+      globalError.value = '连接已断开，正在重连...'
+      setTimeout(connectWebSocket, 3000)
+    }
   }
 
   ws.onerror = () => {
     isConnected.value = false
-    globalError.value = '连接错误，请检查后端是否运行'
+    globalError.value = '连接失败，请确认后端服务正在运行。'
   }
 }
 
-function renderMarkdown(text: string): string {
-  return marked.parse(text, { async: false }) as string
-}
+async function loadSessions() {
+  isLoadingSessions.value = true
+  try {
+    const data = await fetchJson<{ sessions: SessionSummary[] }>('/sessions')
+    sessions.value = data.sessions
 
-function scrollToBottom() {
-  nextTick(() => {
-    if (messagesRef.value) {
-      messagesRef.value.scrollTop = messagesRef.value.scrollHeight
+    if (!sessionId.value && sessions.value.length > 0) {
+      await selectSession(sessions.value[0].session_id)
+    } else if (!sessionId.value) {
+      await createNewSession()
     }
-  })
-}
-
-function toggleReasoning(index: number) {
-  const msg = messages.value[index]
-  if (msg) {
-    msg.showReasoning = !msg.showReasoning
+  } catch (error) {
+    globalError.value = error instanceof Error ? error.message : '加载会话失败'
+  } finally {
+    isLoadingSessions.value = false
   }
 }
 
-function toggleTools(index: number) {
-  const msg = messages.value[index]
-  if (msg) {
-    msg.showTools = !msg.showTools
+async function createNewSession() {
+  if (isProcessing.value) return
+
+  try {
+    const data = await fetchJson<{ session_id: string }>('/sessions', { method: 'POST' })
+    sessionId.value = data.session_id
+    messages.value = []
+    pendingToolCall = null
+    nextBefore.value = null
+    hasMore.value = false
+    await loadSessions()
+    await nextTick()
+    chatInputRef.value?.focus()
+  } catch (error) {
+    globalError.value = error instanceof Error ? error.message : '创建会话失败'
   }
 }
 
-function handleEnter(e: KeyboardEvent) {
-  if (!e.shiftKey && !isProcessing.value) {
-    sendMessage()
+async function deleteSession(id: string) {
+  if (isProcessing.value) return
+
+  const target = sessions.value.find((session) => session.session_id === id)
+  if (!target) return
+  deleteTarget.value = target
+}
+
+function cancelDelete() {
+  deleteTarget.value = null
+}
+
+async function confirmDeleteSession() {
+  if (isProcessing.value || !deleteTarget.value) return
+
+  const id = deleteTarget.value.session_id
+  deleteTarget.value = null
+
+  try {
+    await fetchJson<{ deleted: boolean; session_id: string }>(`/sessions/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    })
+
+    const wasActive = id === sessionId.value
+    const remainingSessions = sessions.value.filter((session) => session.session_id !== id)
+    sessions.value = remainingSessions
+
+    if (!wasActive) {
+      await loadSessions()
+      return
+    }
+
+    messages.value = []
+    pendingToolCall = null
+    nextBefore.value = null
+    hasMore.value = false
+    sessionId.value = ''
+
+    if (remainingSessions.length > 0) {
+      await selectSession(remainingSessions[0].session_id)
+      await loadSessions()
+    } else {
+      await createNewSession()
+    }
+  } catch (error) {
+    globalError.value = error instanceof Error ? error.message : '删除会话失败'
+  }
+}
+
+async function selectSession(id: string) {
+  if (isProcessing.value || id === sessionId.value) return
+
+  sessionId.value = id
+  pendingToolCall = null
+  await loadLatestMessages(id)
+}
+
+async function loadLatestMessages(id: string) {
+  isLoadingHistory.value = true
+  try {
+    const page = await fetchMessagePage(id)
+    messages.value = page.items.map(normalizeMessage)
+    nextBefore.value = page.next_before
+    hasMore.value = page.has_more
+    messageListRef.value?.scrollToBottom()
+  } catch (error) {
+    globalError.value = error instanceof Error ? error.message : '加载消息失败'
+  } finally {
+    isLoadingHistory.value = false
+  }
+}
+
+async function loadOlderMessages() {
+  if (!sessionId.value || !hasMore.value || nextBefore.value === null || isLoadingHistory.value) return
+
+  const previousHeight = messageListRef.value?.getScrollHeight() ?? 0
+  isLoadingHistory.value = true
+
+  try {
+    const page = await fetchMessagePage(sessionId.value, nextBefore.value)
+    messages.value = [...page.items.map(normalizeMessage), ...messages.value]
+    nextBefore.value = page.next_before
+    hasMore.value = page.has_more
+    await nextTick()
+    messageListRef.value?.restoreScrollAfterPrepend(previousHeight)
+  } catch (error) {
+    globalError.value = error instanceof Error ? error.message : '加载更早消息失败'
+  } finally {
+    isLoadingHistory.value = false
+  }
+}
+
+async function fetchMessagePage(id: string, before?: number): Promise<MessagePage> {
+  const params = new URLSearchParams({ limit: '20' })
+  if (before !== undefined) params.set('before', String(before))
+  return await fetchJson<MessagePage>(`/sessions/${encodeURIComponent(id)}/messages?${params}`)
+}
+
+async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, init)
+  const contentType = response.headers.get('content-type') ?? ''
+
+  if (!response.ok) {
+    throw new Error(`请求失败：${response.status} ${url}`)
+  }
+
+  if (!contentType.includes('application/json')) {
+    throw new Error(`接口没有返回 JSON：${url}`)
+  }
+
+  return await response.json() as T
+}
+
+function normalizeMessage(message: Message): Message {
+  return {
+    ...message,
+    toolPairs: message.toolPairs ?? [],
   }
 }
 
 function sendMessage() {
   const text = inputText.value.trim()
-  if (!text || isProcessing.value || !ws || ws.readyState !== WebSocket.OPEN) return
+  if (!text || isProcessing.value || !ws || ws.readyState !== WebSocket.OPEN || !sessionId.value) return
 
-  // 清除之前的错误
   globalError.value = ''
-
-  // 显示用户消息到界面
   messages.value.push({ role: 'user', content: text })
   inputText.value = ''
-  isLoading.value = true
   isProcessing.value = true
-  scrollToBottom()
+  messageListRef.value?.scrollToBottom()
 
-  // 创建 assistant 消息占位
-  const assistantMsg: Message = {
-    role: 'assistant',
-    content: ''
-  }
-  messages.value.push(assistantMsg)
-  isLoading.value = false
+  messages.value.push({ role: 'assistant', content: '' })
 
-  // 发送：只传 session_id 和最新 message
   ws.send(JSON.stringify({
     session_id: sessionId.value,
-    message: text
+    message: text,
   }))
 }
 
-// 临时存储当前消息的工具调用，等待结果配对
-let pendingToolCall: ToolCall | null = null
-
-function handleEvent(event: any) {
+function handleEvent(event: StreamEvent) {
   const lastMsg = messages.value[messages.value.length - 1]
-  if (lastMsg.role !== 'assistant' || lastMsg.isError) return
+  if (!lastMsg || lastMsg.role !== 'assistant' || lastMsg.isError) return
 
   switch (event.type) {
     case 'text':
-      lastMsg.content += event.content
-      scrollToBottom()
+      lastMsg.content += event.content ?? ''
+      messageListRef.value?.scrollToBottom()
       break
 
     case 'reasoning':
-      if (!lastMsg.reasoning) {
-        lastMsg.reasoning = ''
-        lastMsg.showReasoning = false  // 默认折叠
-      }
-      lastMsg.reasoning += event.content
-      scrollToBottom()
+      lastMsg.reasoning = `${lastMsg.reasoning ?? ''}${event.content ?? ''}`
+      messageListRef.value?.scrollToBottom()
       break
 
     case 'tool_call':
-      // 存储待配对的 tool_call
       pendingToolCall = {
-        name: event.name,
-        arguments: event.arguments
+        name: event.name ?? '',
+        arguments: event.arguments ?? '',
       }
-      scrollToBottom()
+      messageListRef.value?.scrollToBottom()
       break
 
     case 'tool_result':
-      // 与 pendingToolCall 配对
       if (pendingToolCall) {
-        if (!lastMsg.toolPairs) {
-          lastMsg.toolPairs = []
-          lastMsg.showTools = false  // 默认折叠
-        }
+        lastMsg.toolPairs = lastMsg.toolPairs ?? []
         lastMsg.toolPairs.push({
           call: pendingToolCall,
-          result: event.result
+          result: event.result ?? '',
         })
         pendingToolCall = null
-        scrollToBottom()
+        messageListRef.value?.scrollToBottom()
       }
       break
 
     case 'done':
-      // 清理未配对的 tool_call
       pendingToolCall = null
-      isProcessing.value = false  // 处理完成
+      isProcessing.value = false
+      void loadSessions()
       break
 
     case 'error':
-      // 错误作为独立消息显示（红色）
       messages.value.push({
         role: 'assistant',
         content: event.error || event.message || '未知错误',
-        isError: true
+        isError: true,
       })
       pendingToolCall = null
-      isProcessing.value = false  // 处理完成（出错）
-      scrollToBottom()
+      isProcessing.value = false
+      messageListRef.value?.scrollToBottom()
+      void loadSessions()
       break
   }
 }
 
 onMounted(() => {
   connectWebSocket()
-  if (inputRef.value) {
-    inputRef.value.focus()
-  }
+  void loadSessions()
+  chatInputRef.value?.focus()
 })
 
 onUnmounted(() => {
+  shouldReconnect = false
   if (ws) {
     ws.close()
   }
@@ -331,375 +378,237 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.chat-container {
+.chat-workspace {
   flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: var(--space-5);
+  padding: var(--space-5);
+}
+
+.chat-panel {
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  border: 1px solid rgba(203, 213, 225, 0.9);
+  border-radius: var(--radius-2xl);
+  background: rgba(248, 250, 252, 0.82);
+  box-shadow: var(--shadow-soft);
   overflow: hidden;
 }
 
-/* 全局错误提示 */
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-6);
+  background: rgba(255, 255, 255, 0.76);
+  border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(18px);
+}
+
+.panel-kicker {
+  margin: 0 0 4px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.panel-header h2 {
+  max-width: min(620px, 70vw);
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-strong);
+  font-size: 22px;
+  letter-spacing: -0.04em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connection-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.connection-pill span {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #f59e0b;
+}
+
+.connection-pill.connected {
+  color: #047857;
+}
+
+.connection-pill.connected span {
+  background: #10b981;
+}
+
 .global-error {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 16px;
-  background: #fff2f0;
-  border-bottom: 1px solid #ffccc7;
-  color: #cf1322;
-  font-size: 14px;
+  gap: var(--space-3);
+  padding: 10px var(--space-6);
+  border-bottom: 1px solid #fecdd3;
+  background: #fff1f2;
+  color: #be123c;
+  font-size: 13px;
 }
 
-.error-icon {
+.global-error span {
+  flex: 1;
+}
+
+.global-error button {
+  border: 0;
+  background: transparent;
+  color: #be123c;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+@media (max-width: 820px) {
+  .chat-workspace {
+    grid-template-columns: 1fr;
+    padding: var(--space-3);
+    gap: var(--space-3);
+  }
+
+  .panel-header {
+    align-items: flex-start;
+    padding: var(--space-4);
+  }
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: rgba(15, 23, 42, 0.42);
+  backdrop-filter: blur(12px);
+}
+
+.delete-modal {
+  width: min(440px, 100%);
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: var(--space-4);
+  padding: var(--space-5);
+  border: 1px solid rgba(254, 202, 202, 0.9);
+  border-radius: var(--radius-2xl);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 28px 80px rgba(15, 23, 42, 0.28);
+}
+
+.delete-icon {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #fee2e2, #fecaca);
+  color: #b91c1c;
+  font-weight: 900;
   font-size: 16px;
 }
 
-.error-text {
-  flex: 1;
+.delete-copy {
+  min-width: 0;
 }
 
-.error-close {
-  background: none;
-  border: none;
-  color: #cf1322;
-  cursor: pointer;
-  font-size: 14px;
-  padding: 2px 6px;
-}
-
-.messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.message {
-  display: flex;
-  gap: 12px;
-  max-width: 100%;
-}
-
-.message.user {
-  flex-direction: row-reverse;
-}
-
-.message.error {
-  flex-direction: row;
-}
-
-.message.error .avatar {
-  background: #fff2f0;
-  border-color: #ffccc7;
-}
-
-.message.error .content {
-  background: #fff2f0;
-  border: 1px solid #ffccc7;
-  color: #cf1322;
-}
-
-.error-text-content {
-  font-family: monospace;
-  font-size: 13px;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-
-.avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 20px;
-  flex-shrink: 0;
-  background: #fff;
-  border: 1px solid #e0e0e0;
-}
-
-.content {
-  max-width: 80%;
-  padding: 12px 16px;
-  border-radius: 12px;
-  line-height: 1.6;
-}
-
-.message.user .content {
-  background: #007bff;
-  color: #fff;
-}
-
-.message.assistant:not(.error) .content {
-  background: #fff;
-  border: 1px solid #e0e0e0;
-  color: #333;
-}
-
-.message.assistant .content :deep(pre) {
-  background: #f4f4f4;
-  padding: 12px;
-  border-radius: 8px;
-  overflow-x: auto;
-  margin: 8px 0;
-}
-
-.message.assistant .content :deep(code) {
-  font-family: 'Courier New', monospace;
-  font-size: 13px;
-}
-
-.message.assistant .content :deep(p) {
-  margin: 0 0 8px 0;
-}
-
-.message.assistant .content :deep(p:last-child) {
-  margin-bottom: 0;
-}
-
-/* 思考内容折叠 */
-.reasoning-section {
-  margin-bottom: 12px;
-  border: 1px solid #e8e8e8;
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.reasoning-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 8px 12px;
-  background: #f5f5f5;
-  border: none;
-  cursor: pointer;
-  font-size: 13px;
-  color: #666;
-  text-align: left;
-  transition: background 0.2s;
-}
-
-.reasoning-toggle:hover {
-  background: #eeeeee;
-}
-
-.toggle-icon {
-  font-size: 10px;
-  color: #999;
-}
-
-.toggle-text {
-  flex: 1;
-}
-
-.reasoning-badge {
-  font-size: 11px;
-  color: #999;
-  background: #fff;
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-
-.reasoning-content {
-  padding: 10px 12px;
-  background: #fafafa;
-  border-top: 1px solid #e8e8e8;
-}
-
-.reasoning-content pre {
-  margin: 0;
-  font-family: 'Courier New', monospace;
-  font-size: 13px;
-  line-height: 1.5;
-  color: #666;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-
-/* 工具区域折叠 - 紧凑模式 */
-.tools-section {
-  margin-bottom: 8px;
-}
-
-.tools-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  background: #f0f5ff;
-  border: 1px solid #d6e4ff;
-  border-radius: 4px;
-  cursor: pointer;
+.modal-kicker {
+  margin: 0 0 4px;
+  color: #e11d48;
   font-size: 12px;
-  color: #2f54eb;
-  line-height: 1.4;
-  transition: background 0.2s;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
-.tools-toggle:hover {
-  background: #d6e4ff;
+.delete-copy h3 {
+  margin: 0 0 10px;
+  color: var(--text-strong);
+  font-size: 22px;
+  line-height: 1.3;
+  letter-spacing: -0.04em;
+  word-break: break-word;
 }
 
-.tools-badge {
-  font-size: 11px;
-  color: #2f54eb;
-  opacity: 0.8;
-}
-
-.tools-content {
-  margin-top: 8px;
-  padding: 10px 12px;
-  background: #f8f9fa;
-  border: 1px solid #e8e8e8;
-  border-radius: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.tool-pair {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.tool-call, .tool-result {
-  background: #fff;
-  border: 1px solid #e0e0e0;
-  border-radius: 8px;
-  padding: 10px 12px;
-  font-size: 13px;
-}
-
-.tool-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-  font-weight: 500;
-}
-
-.tool-icon {
+.delete-session-name {
+  max-width: 100%;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  overflow: hidden;
+  border: 1px solid #fecdd3;
+  border-radius: var(--radius-md);
+  background: #fff1f2;
+  color: #9f1239;
   font-size: 14px;
+  font-weight: 700;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.tool-name {
-  color: #555;
-}
-
-.tool-args {
-  color: #666;
-  font-family: monospace;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-
-.tool-output {
-  color: #333;
-  font-family: monospace;
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 300px;
-  overflow-y: auto;
-  background: #f4f4f4;
-  padding: 8px;
-  border-radius: 4px;
+.delete-description {
   margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.65;
 }
 
-.input-area {
-  padding: 16px 20px;
-  background: #fff;
-  border-top: 1px solid #e0e0e0;
-}
-
-.input-box {
+.modal-actions {
+  grid-column: 1 / -1;
   display: flex;
-  gap: 12px;
-  align-items: flex-end;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  padding-top: var(--space-2);
 }
 
-.input-box textarea {
-  flex: 1;
-  padding: 12px 16px;
-  border: 1px solid #d0d0d0;
-  border-radius: 12px;
-  resize: none;
-  font-size: 15px;
-  line-height: 1.5;
-  max-height: 150px;
-  font-family: inherit;
-}
-
-.input-box textarea:focus {
-  outline: none;
-  border-color: #007bff;
-}
-
-.input-box button {
-  padding: 12px 24px;
-  background: #007bff;
-  color: #fff;
-  border: none;
-  border-radius: 12px;
-  font-size: 15px;
+.secondary-action,
+.danger-action {
+  border-radius: var(--radius-md);
+  padding: 10px 16px;
+  font-weight: 800;
+  font-size: 14px;
   cursor: pointer;
-  transition: background 0.2s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 80px;
-  height: 44px;
 }
 
-.input-box button:hover:not(:disabled) {
-  background: #0056b3;
+.secondary-action {
+  border: 1px solid var(--border-strong);
+  background: #fff;
+  color: var(--text-primary);
 }
 
-.input-box button:disabled {
-  background: #ccc;
-  cursor: not-allowed;
+.secondary-action:hover {
+  background: var(--surface-muted);
 }
 
-/* 加载动画 */
-.spinner {
-  display: inline-block;
-  width: 18px;
-  height: 18px;
-  border: 2px solid #fff;
-  border-top-color: transparent;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+.danger-action {
+  border: 1px solid #dc2626;
+  background: linear-gradient(135deg, #dc2626, #b91c1c);
+  color: #fff;
+  box-shadow: 0 12px 26px rgba(220, 38, 38, 0.22);
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-.typing-indicator {
-  display: flex;
-  gap: 4px;
-  padding: 4px 0;
-}
-
-.typing-indicator span {
-  width: 8px;
-  height: 8px;
-  background: #999;
-  border-radius: 50%;
-  animation: bounce 1.4s infinite ease-in-out;
-}
-
-.typing-indicator span:nth-child(1) { animation-delay: 0s; }
-.typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
-.typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
-
-@keyframes bounce {
-  0%, 80%, 100% { transform: scale(0); }
-  40% { transform: scale(1); }
+.danger-action:hover {
+  transform: translateY(-1px);
 }
 </style>
