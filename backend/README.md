@@ -26,6 +26,10 @@ uv run python main.py
 | `OPENAI_BASE_URL` | OpenAI 兼容 API Base URL |
 | `OPENAI_MODEL` | 模型名称，未设置时默认 `gpt-4o` |
 | `MINICLAW_CONTEXT_WINDOW_SIZE` | 模型请求上下文窗口大小，默认 `20` 条持久化消息 |
+| `MINICLAW_MEMORY_DIR` | 长期记忆目录，默认 `backend/memories` |
+| `MINICLAW_EMBEDDING_MODEL` | 可选 Embedding 模型；未设置时 vector 搜索不可用 |
+| `MINICLAW_EMBEDDING_BASE_URL` | 可选 Embedding API Base URL |
+| `MINICLAW_EMBEDDING_API_KEY` | 可选 Embedding API Key |
 
 ## 2. 总体架构
 
@@ -199,6 +203,7 @@ Tool(
 - `miniclaw.tools.skills.SkillRepository` 负责索引 `backend/skills/`，并提供 Skill 列表、文件读取和文件树输出。
 - `miniclaw.tools.command.CommandRunner` 负责命令执行、工作目录、超时、输出拼接，并保留后续安全策略扩展点。
 - `miniclaw.tools.files.FileTools` 负责通用文件读取、列表/glob、文本搜索、写入和精确替换。
+- `miniclaw.memory.MemoryService` 负责长期记忆的 Markdown 存储、SQLite 索引、FTS 检索和可选向量检索。
 
 工具模块调用关系：
 
@@ -225,6 +230,12 @@ miniclaw.tools.registry.get_builtin_tools()
        ├─ search_text
        ├─ write_file
        └─ replace_text
+
+  └─ get_memory_tools(MemoryService)
+       ├─ remember
+       ├─ search_memory
+       ├─ read_memory
+       └─ forget_memory
 ```
 
 `backend/tools.py` 还保留这些兼容导出：
@@ -250,8 +261,36 @@ miniclaw.tools.registry.get_builtin_tools()
 | `search_text` | 在本地文本文件中搜索字符串或正则表达式 |
 | `write_file` | 写入本地文本文件，会创建缺失父目录并覆盖内容 |
 | `replace_text` | 对本地文本文件执行精确文本替换 |
+| `remember` | 保存一条 Markdown-backed 长期记忆并建立 SQLite 索引 |
+| `search_memory` | 搜索长期记忆，支持 `fts`、`vector`、`hybrid` 三种模式，返回相关片段 |
+| `read_memory` | 按 memory_id 读取完整 Markdown 记忆文档 |
+| `forget_memory` | 按 memory_id 删除/遗忘记忆，使其不再出现在检索结果中 |
+| `reindex_memories` | 从 Markdown 权威文件重建长期记忆 SQLite 索引 |
 
 通用文件工具当前不包含安全确认、权限分级或沙箱治理；这些能力会作为后续安全策略单独设计。
+
+## 8.1 长期记忆系统
+
+长期记忆默认存放在：
+
+```text
+backend/memories/
+├─ memory.sqlite
+├─ profile/user.md
+├─ memory/<topic>.md
+├─ daily/YYYY-MM-DD.md
+└─ .trash/
+```
+
+- Markdown 文件是完整记忆正文的权威来源，包含 frontmatter 元数据。
+- 记忆按 scoped Markdown 文档组织：`profile` 保存用户稳定偏好，`memory` 保存主题级长期事实，`daily` 保存当日摘要。
+- SQLite 存储 `memories`、`memory_chunks`、`memory_embeddings` 和 `memory_fts`。
+- `search_memory` 返回 chunk 级结果，包括 `memory_id`、`chunk_id`、Markdown 路径、位置、片段和读取完整文档的提示。
+- `read_memory(memory_id)` 返回完整 Markdown 文档。
+- `fts` 模式使用 SQLite FTS5，并对中文生成 bigram 检索文本。
+- `vector` 模式需要配置 embedding；未配置时返回明确不可用提示。
+- `hybrid` 模式在 embedding 可用时合并 FTS 和 vector 结果；不可用时降级为 FTS。
+- `reindex_memories` 可在手动编辑 Markdown 或索引损坏后重建 SQLite 索引。
 
 ## 8. Skill 系统
 
