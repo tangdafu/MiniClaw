@@ -8,7 +8,7 @@
         <ReasoningBlock v-if="message.reasoning" :reasoning="message.reasoning" />
         <ToolTimeline v-if="message.toolPairs?.length" :tool-pairs="message.toolPairs" />
         <MarkdownContent v-if="message.content" :content="message.content" />
-        <div v-else class="stream-placeholder">正在生成回复...</div>
+        <div v-else class="stream-placeholder">{{ placeholderText }}</div>
       </template>
     </div>
   </article>
@@ -28,6 +28,12 @@ const props = defineProps<{
 const avatarLabel = computed(() => {
   if (props.message.isError) return '!'
   return props.message.role === 'user' ? '你' : 'M'
+})
+
+const placeholderText = computed(() => {
+  if (props.message.status === 'queued') return '已加入队列，等待执行...'
+  if (props.message.status === 'cancelled') return '已停止生成'
+  return '正在生成回复...'
 })
 
 </script>

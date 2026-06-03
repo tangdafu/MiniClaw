@@ -64,42 +64,65 @@ def present_messages(messages: list[dict[str, Any]]) -> list[DisplayMessage]:
             continue
 
         if role == "assistant":
-            tool_calls = message.get("tool_calls") or []
-            next_index = index + 1
-            tool_results: dict[str, str] = {}
-
-            while next_index < len(messages) and messages[next_index].get("role") == "tool":
-                tool_message = messages[next_index]
-                tool_call_id = tool_message.get("tool_call_id")
-                if tool_call_id:
-                    tool_results[str(tool_call_id)] = _string_content(tool_message.get("content", ""))
-                next_index += 1
-
-            tool_pairs = [
-                DisplayToolPair(
-                    call=DisplayToolCall(
-                        name=str((tool_call.get("function") or {}).get("name") or ""),
-                        arguments=_string_content((tool_call.get("function") or {}).get("arguments", "")),
-                    ),
-                    result=tool_results.get(str(tool_call.get("id", "")), ""),
-                )
-                for tool_call in tool_calls
-            ]
-
-            display_messages.append(
-                DisplayMessage(
-                    role="assistant",
-                    content=_string_content(message.get("content", "")),
-                    reasoning=message.get("reasoning_content") or None,
-                    toolPairs=tool_pairs,
-                )
-            )
-            index = max(next_index, index + 1)
+            display_message, index = _present_assistant_turn(messages, index)
+            display_messages.append(display_message)
             continue
 
         index += 1
 
     return display_messages
+
+
+def _present_assistant_turn(messages: list[dict[str, Any]], start_index: int) -> tuple[DisplayMessage, int]:
+    """Group a persisted ReAct assistant/tool chain into one frontend bubble."""
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    tool_pairs: list[DisplayToolPair] = []
+    index = start_index
+
+    while index < len(messages) and messages[index].get("role") == "assistant":
+        message = messages[index]
+        content = _string_content(message.get("content", ""))
+        reasoning = _string_content(message.get("reasoning_content", ""))
+        tool_calls = message.get("tool_calls") or []
+
+        if content:
+            content_parts.append(content)
+        if reasoning:
+            reasoning_parts.append(reasoning)
+
+        index += 1
+        tool_results: dict[str, str] = {}
+        while index < len(messages) and messages[index].get("role") == "tool":
+            tool_message = messages[index]
+            tool_call_id = tool_message.get("tool_call_id")
+            if tool_call_id:
+                tool_results[str(tool_call_id)] = _string_content(tool_message.get("content", ""))
+            index += 1
+
+        tool_pairs.extend(
+            DisplayToolPair(
+                call=DisplayToolCall(
+                    name=str((tool_call.get("function") or {}).get("name") or ""),
+                    arguments=_string_content((tool_call.get("function") or {}).get("arguments", "")),
+                ),
+                result=tool_results.get(str(tool_call.get("id", "")), ""),
+            )
+            for tool_call in tool_calls
+        )
+
+        if not tool_calls:
+            break
+
+    return (
+        DisplayMessage(
+            role="assistant",
+            content="\n\n".join(content_parts),
+            reasoning="\n".join(reasoning_parts) or None,
+            toolPairs=tool_pairs,
+        ),
+        index,
+    )
 
 
 def paginate_display_messages(

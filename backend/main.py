@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -100,18 +101,56 @@ async def websocket_chat(
     返回: Event 流
     """
     await websocket.accept()
-    try:
+    outgoing: asyncio.Queue[dict] = asyncio.Queue()
+
+    async def emit(event: dict) -> None:
+        await outgoing.put(event)
+
+    async def sender() -> None:
+        while True:
+            event = await outgoing.get()
+            await websocket.send_json(event)
+            outgoing.task_done()
+
+    async def receiver() -> None:
         while True:
             data = await websocket.receive_json()
+            command = data.get("type") or "chat"
             session_id = data.get("session_id", "")
-            user_message = data.get("message", "").strip()
 
-            if not user_message:
+            if command == "chat":
+                user_message = data.get("message", "").strip()
+                if not user_message:
+                    continue
+                await claw.enqueue_chat(session_id, user_message, emit)
                 continue
 
-            # 调用 Claw 完成对话（上下文管理 + Agent 调用）
-            async for event in claw.chat(session_id, user_message):
-                await websocket.send_json(event.model_dump(exclude_none=True))
+            if command == "cancel_current":
+                cancelled = await claw.cancel_current(session_id)
+                await emit({"type": "cancel_requested", "session_id": session_id, "cancelled": cancelled})
+                continue
+
+            if command == "clear_queue":
+                await claw.clear_queue(session_id, emit)
+                continue
+
+            if command == "stop_session":
+                await claw.stop_session(session_id, emit)
+                continue
+
+            await emit({"type": "error", "session_id": session_id, "error": f"Unknown command: {command}"})
+
+    sender_task = asyncio.create_task(sender())
+    receiver_task = asyncio.create_task(receiver())
+    try:
+        done, pending = await asyncio.wait(
+            {sender_task, receiver_task},
+            return_when=asyncio.FIRST_EXCEPTION,
+        )
+        for task in done:
+            task.result()
+        for task in pending:
+            task.cancel()
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
@@ -119,6 +158,10 @@ async def websocket_chat(
         logger.exception("WebSocket error")
         await websocket.send_json({"type": "error", "error": str(e)})
         await websocket.close()
+    finally:
+        sender_task.cancel()
+        receiver_task.cancel()
+        await claw.stop_all_sessions()
 
 
 @app.get("/health")

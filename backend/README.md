@@ -94,7 +94,7 @@ uv run python main.py
 
 ## 4. WebSocket 协议
 
-前端发送：
+前端发送聊天命令。旧格式仍兼容：
 
 ```json
 {
@@ -103,33 +103,69 @@ uv run python main.py
 }
 ```
 
+推荐命令格式：
+
+```json
+{
+  "type": "chat",
+  "session_id": "<session_id>",
+  "message": "你好"
+}
+```
+
+运行控制命令：
+
+```json
+{ "type": "cancel_current", "session_id": "<session_id>" }
+{ "type": "clear_queue", "session_id": "<session_id>" }
+{ "type": "stop_session", "session_id": "<session_id>" }
+```
+
+`Claw` 为每个 session 维护一个内存优先级 FIFO 队列。同一个 session 一次只执行一个 run，后续命令排队；不同 session 可以并发执行。
+
 后端返回一组流式事件：
 
 | 事件类型 | 字段 | 说明 |
 |----------|------|------|
 | `session_created` | `session_id` | 后端创建新会话时返回 |
-| `text` | `content` | 模型正文增量 |
-| `reasoning` | `content` | 模型 reasoning 增量，适用于支持该字段的模型 |
-| `tool_call` | `name`, `arguments` | Runtime 即将展示的工具调用 |
-| `tool_result` | `name`, `result` | 工具执行结果 |
-| `done` | - | 当前用户消息处理完成 |
+| `queued` | `session_id`, `run_id`, `queue_position`, `queued_count` | 聊天命令已加入队列 |
+| `run_started` | `session_id`, `run_id` | queued job 开始执行 |
+| `queue_updated` | `session_id`, `running_run_id`, `queued_count` | 队列或运行状态变化 |
+| `text` | `session_id`, `run_id`, `content` | 模型正文增量 |
+| `reasoning` | `session_id`, `run_id`, `content` | 模型 reasoning 增量，适用于支持该字段的模型 |
+| `tool_call` | `session_id`, `run_id`, `name`, `arguments` | Runtime 即将展示的工具调用 |
+| `tool_result` | `session_id`, `run_id`, `name`, `result` | 工具执行结果 |
+| `done` | `session_id`, `run_id` | 当前 run 完成 |
+| `cancelled` | `session_id`, `run_id` | 当前 run 被取消 |
+| `queue_cleared` | `session_id`, `cleared_count` | 未开始的 queued jobs 已清空 |
+| `session_stopped` | `session_id`, `cleared_count` | 当前 run 被取消且队列已清空 |
 | `error` | `error` | 错误信息。内部字段名为 `error_msg`，序列化时映射为 `error` |
 
 ## 5. 一次对话的完整流程
 
 ```text
-用户输入
+用户输入一个或多个命令
   │
   ▼
 前端 ChatView.vue
-  │  WebSocket 发送 { session_id, message }
+  │  WebSocket 发送 chat / cancel_current / clear_queue / stop_session
   ▼
 main.py /ws/chat
-  │
+  │  receiver 接收命令，sender 发送事件
   ▼
-Claw.chat(session_id, user_message)
+Claw.enqueue_chat(session_id, user_message)
   │
-  ├─ session_id 为空或不存在：创建新会话，yield session_created
+  ├─ session_id 为空或不存在：创建新会话，emit session_created
+  ├─ 创建 run_id，加入该 session 的优先级 FIFO 队列
+  ├─ emit queued / queue_updated
+  └─ 确保该 session worker 正在运行
+        │
+        ▼
+session worker
+  │
+  ├─ 每次只取一个 queued job 执行
+  ├─ 不同 session worker 可并发执行
+  ├─ emit run_started
   │
   ├─ SessionManager.load_messages(session_id)
   │
@@ -161,7 +197,7 @@ ReactRuntime.run(messages, user_message)
 Claw 保存完整 messages 到 chat.json
   │
   ▼
-前端渲染正文、思考过程、工具调用和结果
+前端按 session_id/run_id 路由事件，渲染正文、思考过程、工具调用和队列状态
 ```
 
 ## 6. ReAct Runtime 循环

@@ -10,10 +10,18 @@
         @keydown.enter.prevent="handleEnter"
       ></textarea>
       <button class="send-button" :disabled="disabled || !modelValue.trim()" @click="$emit('send')">
-        {{ isProcessing ? '发送中' : '发送' }}
+        {{ isProcessing ? '加入队列' : '发送' }}
       </button>
     </div>
-    <p class="input-hint">Enter 发送，Shift + Enter 换行</p>
+    <div class="input-footer">
+      <p class="input-hint">Enter 发送，Shift + Enter 换行</p>
+      <div v-if="isProcessing || queuedCount > 0" class="run-controls">
+        <span>{{ isProcessing ? '正在生成' : '空闲' }}<template v-if="queuedCount > 0"> · 排队 {{ queuedCount }}</template></span>
+        <button @click="$emit('cancelCurrent')">停止当前</button>
+        <button :disabled="queuedCount === 0" @click="$emit('clearQueue')">清空队列</button>
+        <button @click="$emit('stopSession')">全部停止</button>
+      </div>
+    </div>
   </footer>
 </template>
 
@@ -24,12 +32,16 @@ const props = defineProps<{
   modelValue: string
   disabled: boolean
   isProcessing: boolean
+  queuedCount: number
   placeholder?: string
 }>()
 
 const emit = defineEmits<{
   'update:modelValue': [value: string]
   send: []
+  cancelCurrent: []
+  clearQueue: []
+  stopSession: []
 }>()
 
 const textareaRef = ref<HTMLTextAreaElement>()
@@ -111,10 +123,49 @@ textarea::placeholder {
   cursor: not-allowed;
 }
 
+.input-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: 8px 14px 0;
+}
+
 .input-hint {
   margin: 8px 14px 0;
   color: var(--text-tertiary);
   font-size: 12px;
+}
+
+.input-footer .input-hint {
+  margin: 0;
+}
+
+.run-controls {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.run-controls button {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text-secondary);
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.run-controls button:hover:not(:disabled) {
+  border-color: var(--accent-soft);
+  color: var(--accent);
+}
+
+.run-controls button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 @media (max-width: 720px) {

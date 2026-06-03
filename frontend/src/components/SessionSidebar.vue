@@ -32,6 +32,9 @@
           </button>
         </span>
         <span class="session-meta">{{ session.message_count }} 条消息 · {{ formatDate(session.updated_at) }}</span>
+        <span v-if="runningSessionIds.includes(session.session_id) || queuedCounts[session.session_id]" class="session-runtime">
+          {{ runtimeLabel(session.session_id) }}
+        </span>
       </button>
 
       <div v-if="sessions.length === 0 && !isLoading" class="empty-sessions">
@@ -48,11 +51,13 @@
 <script setup lang="ts">
 import type { SessionSummary } from '../types/chat'
 
-defineProps<{
+const props = defineProps<{
   sessions: SessionSummary[]
   activeSessionId: string
   disabled: boolean
   isLoading: boolean
+  runningSessionIds: string[]
+  queuedCounts: Record<string, number>
 }>()
 
 defineEmits<{
@@ -65,6 +70,14 @@ function formatDate(value: string): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '刚刚'
   return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
+}
+
+function runtimeLabel(sessionId: string): string {
+  const queued = props.queuedCounts[sessionId] ?? 0
+  const running = props.runningSessionIds.includes(sessionId)
+  if (running && queued > 0) return `生成中 · 排队 ${queued}`
+  if (running) return '生成中'
+  return `排队 ${queued}`
 }
 </script>
 
@@ -197,9 +210,20 @@ h2 {
 }
 
 .session-meta,
+.session-runtime,
 .empty-sessions {
   color: #94a3b8;
   font-size: 12px;
+}
+
+.session-runtime {
+  width: fit-content;
+  padding: 3px 7px;
+  border: 1px solid rgba(96, 165, 250, 0.28);
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.16);
+  color: #bfdbfe;
+  font-weight: 800;
 }
 
 .empty-sessions {

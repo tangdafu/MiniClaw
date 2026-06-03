@@ -3,8 +3,10 @@
     <SessionSidebar
       :sessions="sessions"
       :active-session-id="sessionId"
-      :disabled="isProcessing"
+      :disabled="isLoadingSessions"
       :is-loading="isLoadingSessions"
+      :running-session-ids="runningSessionIds"
+      :queued-counts="queuedCounts"
       @create="createNewSession"
       @select="selectSession"
       @delete="deleteSession"
@@ -30,20 +32,24 @@
 
       <MessageList
         ref="messageListRef"
-        :messages="messages"
-        :is-loading-history="isLoadingHistory"
-        :has-more="hasMore"
-        :is-generating="isProcessing"
+        :messages="activeMessages"
+        :is-loading-history="activeRuntime.isLoadingHistory"
+        :has-more="activeRuntime.hasMore"
+        :is-generating="activeRuntime.isProcessing"
         @load-older="loadOlderMessages"
       />
 
       <ChatInput
         ref="chatInputRef"
         v-model="inputText"
-        :disabled="isProcessing || !isConnected || !sessionId"
-        :is-processing="isProcessing"
+        :disabled="!isConnected || !sessionId"
+        :is-processing="activeRuntime.isProcessing"
+        :queued-count="activeRuntime.queuedCount"
         placeholder="向 MiniClaw 提问，或描述你想完成的任务..."
         @send="sendMessage"
+        @cancel-current="cancelCurrentRun"
+        @clear-queue="clearActiveQueue"
+        @stop-session="stopActiveSession"
       />
     </section>
 
@@ -72,15 +78,23 @@ import MessageList from './MessageList.vue'
 import SessionSidebar from './SessionSidebar.vue'
 import type { Message, MessagePage, SessionSummary, StreamEvent, ToolCall } from '../types/chat'
 
-const messages = ref<Message[]>([])
+interface SessionRuntimeState {
+  messages: Message[]
+  isProcessing: boolean
+  pendingToolCalls: Record<string, ToolCall>
+  activeRunId: string
+  queuedCount: number
+  nextBefore: number | null
+  hasMore: boolean
+  isLoadingHistory: boolean
+  hasLoadedHistory: boolean
+}
+
 const sessions = ref<SessionSummary[]>([])
+const sessionStates = ref<Record<string, SessionRuntimeState>>({})
 const inputText = ref('')
-const isProcessing = ref(false)
 const isConnected = ref(false)
 const isLoadingSessions = ref(false)
-const isLoadingHistory = ref(false)
-const hasMore = ref(false)
-const nextBefore = ref<number | null>(null)
 const globalError = ref('')
 const sessionId = ref('')
 const messageListRef = ref<InstanceType<typeof MessageList>>()
@@ -88,12 +102,32 @@ const chatInputRef = ref<InstanceType<typeof ChatInput>>()
 const deleteTarget = ref<SessionSummary | null>(null)
 
 let ws: WebSocket | null = null
-let pendingToolCall: ToolCall | null = null
 let shouldReconnect = true
+
+const emptyRuntime: SessionRuntimeState = {
+  messages: [],
+  isProcessing: false,
+  pendingToolCalls: {},
+  activeRunId: '',
+  queuedCount: 0,
+  nextBefore: null,
+  hasMore: false,
+  isLoadingHistory: false,
+  hasLoadedHistory: false,
+}
 
 const activeTitle = computed(() => {
   return sessions.value.find((session) => session.session_id === sessionId.value)?.title || '新会话'
 })
+
+const activeRuntime = computed(() => sessionId.value ? ensureSessionState(sessionId.value) : emptyRuntime)
+const activeMessages = computed(() => activeRuntime.value.messages)
+const runningSessionIds = computed(() => Object.entries(sessionStates.value)
+  .filter(([, state]) => state.isProcessing)
+  .map(([id]) => id))
+const queuedCounts = computed(() => Object.fromEntries(
+  Object.entries(sessionStates.value).map(([id, state]) => [id, state.queuedCount]),
+))
 
 function connectWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -111,6 +145,7 @@ function connectWebSocket() {
       const data = JSON.parse(event.data) as StreamEvent
       if (data.type === 'session_created' && data.session_id) {
         sessionId.value = data.session_id
+        ensureSessionState(data.session_id)
         void loadSessions()
         return
       }
@@ -153,15 +188,10 @@ async function loadSessions() {
 }
 
 async function createNewSession() {
-  if (isProcessing.value) return
-
   try {
     const data = await fetchJson<{ session_id: string }>('/sessions', { method: 'POST' })
     sessionId.value = data.session_id
-    messages.value = []
-    pendingToolCall = null
-    nextBefore.value = null
-    hasMore.value = false
+    sessionStates.value[data.session_id] = createRuntimeState()
     await loadSessions()
     await nextTick()
     chatInputRef.value?.focus()
@@ -171,7 +201,11 @@ async function createNewSession() {
 }
 
 async function deleteSession(id: string) {
-  if (isProcessing.value) return
+  const state = sessionStates.value[id]
+  if (state?.isProcessing || state?.queuedCount) {
+    globalError.value = '该会话还有运行中或排队任务，请先停止后再删除。'
+    return
+  }
 
   const target = sessions.value.find((session) => session.session_id === id)
   if (!target) return
@@ -183,7 +217,7 @@ function cancelDelete() {
 }
 
 async function confirmDeleteSession() {
-  if (isProcessing.value || !deleteTarget.value) return
+  if (!deleteTarget.value) return
 
   const id = deleteTarget.value.session_id
   deleteTarget.value = null
@@ -202,10 +236,7 @@ async function confirmDeleteSession() {
       return
     }
 
-    messages.value = []
-    pendingToolCall = null
-    nextBefore.value = null
-    hasMore.value = false
+    delete sessionStates.value[id]
     sessionId.value = ''
 
     if (remainingSessions.length > 0) {
@@ -220,45 +251,56 @@ async function confirmDeleteSession() {
 }
 
 async function selectSession(id: string) {
-  if (isProcessing.value || id === sessionId.value) return
+  if (id === sessionId.value) return
 
   sessionId.value = id
-  pendingToolCall = null
-  await loadLatestMessages(id)
+  const state = ensureSessionState(id)
+  if (!state.hasLoadedHistory && state.messages.length === 0) {
+    await loadLatestMessages(id)
+  } else {
+    await nextTick()
+    messageListRef.value?.scrollToBottom()
+  }
 }
 
 async function loadLatestMessages(id: string) {
-  isLoadingHistory.value = true
+  const state = ensureSessionState(id)
+  state.isLoadingHistory = true
   try {
     const page = await fetchMessagePage(id)
-    messages.value = page.items.map(normalizeMessage)
-    nextBefore.value = page.next_before
-    hasMore.value = page.has_more
+    if (!state.isProcessing && state.queuedCount === 0) {
+      state.messages = page.items.map(normalizeMessage)
+    }
+    state.nextBefore = page.next_before
+    state.hasMore = page.has_more
+    state.hasLoadedHistory = true
     messageListRef.value?.scrollToBottom()
   } catch (error) {
     globalError.value = error instanceof Error ? error.message : '加载消息失败'
   } finally {
-    isLoadingHistory.value = false
+    state.isLoadingHistory = false
   }
 }
 
 async function loadOlderMessages() {
-  if (!sessionId.value || !hasMore.value || nextBefore.value === null || isLoadingHistory.value) return
+  if (!sessionId.value) return
+  const state = ensureSessionState(sessionId.value)
+  if (!state.hasMore || state.nextBefore === null || state.isLoadingHistory) return
 
   const previousHeight = messageListRef.value?.getScrollHeight() ?? 0
-  isLoadingHistory.value = true
+  state.isLoadingHistory = true
 
   try {
-    const page = await fetchMessagePage(sessionId.value, nextBefore.value)
-    messages.value = [...page.items.map(normalizeMessage), ...messages.value]
-    nextBefore.value = page.next_before
-    hasMore.value = page.has_more
+    const page = await fetchMessagePage(sessionId.value, state.nextBefore)
+    state.messages = [...page.items.map(normalizeMessage), ...state.messages]
+    state.nextBefore = page.next_before
+    state.hasMore = page.has_more
     await nextTick()
     messageListRef.value?.restoreScrollAfterPrepend(previousHeight)
   } catch (error) {
     globalError.value = error instanceof Error ? error.message : '加载更早消息失败'
   } finally {
-    isLoadingHistory.value = false
+    state.isLoadingHistory = false
   }
 }
 
@@ -292,74 +334,183 @@ function normalizeMessage(message: Message): Message {
 
 function sendMessage() {
   const text = inputText.value.trim()
-  if (!text || isProcessing.value || !ws || ws.readyState !== WebSocket.OPEN || !sessionId.value) return
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN || !sessionId.value) return
 
+  const state = ensureSessionState(sessionId.value)
   globalError.value = ''
-  messages.value.push({ role: 'user', content: text })
+  state.messages.push({ role: 'user', content: text })
   inputText.value = ''
-  isProcessing.value = true
   messageListRef.value?.scrollToBottom()
 
-  messages.value.push({ role: 'assistant', content: '' })
-
   ws.send(JSON.stringify({
+    type: 'chat',
     session_id: sessionId.value,
     message: text,
   }))
 }
 
 function handleEvent(event: StreamEvent) {
-  const lastMsg = messages.value[messages.value.length - 1]
-  if (!lastMsg || lastMsg.role !== 'assistant' || lastMsg.isError) return
+  const eventSessionId = event.session_id || sessionId.value
+  if (!eventSessionId) return
+  const state = ensureSessionState(eventSessionId)
 
   switch (event.type) {
+    case 'queued':
+      state.queuedCount = event.queued_count ?? state.queuedCount
+      ensureAssistantForRun(state, event.run_id, 'queued')
+      scrollIfActive(eventSessionId)
+      break
+
+    case 'run_started': {
+      const message = ensureAssistantForRun(state, event.run_id, 'running')
+      message.status = 'running'
+      state.activeRunId = event.run_id ?? ''
+      state.isProcessing = true
+      scrollIfActive(eventSessionId)
+      break
+    }
+
+    case 'queue_updated':
+      state.activeRunId = event.running_run_id ?? ''
+      state.queuedCount = event.queued_count ?? 0
+      state.isProcessing = Boolean(state.activeRunId)
+      break
+
     case 'text':
-      lastMsg.content += event.content ?? ''
-      messageListRef.value?.scrollToBottom()
+      ensureAssistantForRun(state, event.run_id, 'running').content += event.content ?? ''
+      scrollIfActive(eventSessionId)
       break
 
     case 'reasoning':
-      lastMsg.reasoning = `${lastMsg.reasoning ?? ''}${event.content ?? ''}`
-      messageListRef.value?.scrollToBottom()
+      {
+        const message = ensureAssistantForRun(state, event.run_id, 'running')
+        message.reasoning = `${message.reasoning ?? ''}${event.content ?? ''}`
+      }
+      scrollIfActive(eventSessionId)
       break
 
     case 'tool_call':
-      pendingToolCall = {
+      if (!event.run_id) return
+      state.pendingToolCalls[event.run_id] = {
         name: event.name ?? '',
         arguments: event.arguments ?? '',
       }
-      messageListRef.value?.scrollToBottom()
+      scrollIfActive(eventSessionId)
       break
 
     case 'tool_result':
-      if (pendingToolCall) {
-        lastMsg.toolPairs = lastMsg.toolPairs ?? []
-        lastMsg.toolPairs.push({
-          call: pendingToolCall,
+      if (event.run_id && state.pendingToolCalls[event.run_id]) {
+        const message = ensureAssistantForRun(state, event.run_id, 'running')
+        message.toolPairs = message.toolPairs ?? []
+        message.toolPairs.push({
+          call: state.pendingToolCalls[event.run_id],
           result: event.result ?? '',
         })
-        pendingToolCall = null
-        messageListRef.value?.scrollToBottom()
+        delete state.pendingToolCalls[event.run_id]
+        scrollIfActive(eventSessionId)
       }
       break
 
     case 'done':
-      pendingToolCall = null
-      isProcessing.value = false
+      ensureAssistantForRun(state, event.run_id, 'done').status = 'done'
       void loadSessions()
       break
 
+    case 'cancelled': {
+      const message = ensureAssistantForRun(state, event.run_id, 'cancelled')
+      message.status = 'cancelled'
+      if (!message.content) message.content = '[已停止生成]'
+      scrollIfActive(eventSessionId)
+      break
+    }
+
+    case 'queue_cleared':
+      state.queuedCount = 0
+      markQueuedMessagesCancelled(state, '[已从队列移除]')
+      break
+
+    case 'session_stopped':
+      state.queuedCount = 0
+      state.isProcessing = false
+      state.activeRunId = ''
+      markQueuedMessagesCancelled(state, '[已停止]')
+      break
+
     case 'error':
-      messages.value.push({
+      state.messages.push({
         role: 'assistant',
         content: event.error || event.message || '未知错误',
         isError: true,
+        runId: event.run_id,
+        status: 'error',
       })
-      pendingToolCall = null
-      isProcessing.value = false
-      messageListRef.value?.scrollToBottom()
+      scrollIfActive(eventSessionId)
       void loadSessions()
       break
+  }
+}
+
+function cancelCurrentRun() {
+  sendControl('cancel_current')
+}
+
+function clearActiveQueue() {
+  sendControl('clear_queue')
+}
+
+function stopActiveSession() {
+  sendControl('stop_session')
+}
+
+function sendControl(type: 'cancel_current' | 'clear_queue' | 'stop_session') {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !sessionId.value) return
+  ws.send(JSON.stringify({ type, session_id: sessionId.value }))
+}
+
+function createRuntimeState(): SessionRuntimeState {
+  return {
+    messages: [],
+    isProcessing: false,
+    pendingToolCalls: {},
+    activeRunId: '',
+    queuedCount: 0,
+    nextBefore: null,
+    hasMore: false,
+    isLoadingHistory: false,
+    hasLoadedHistory: false,
+  }
+}
+
+function ensureSessionState(id: string): SessionRuntimeState {
+  if (!sessionStates.value[id]) {
+    sessionStates.value[id] = createRuntimeState()
+  }
+  return sessionStates.value[id]
+}
+
+function ensureAssistantForRun(state: SessionRuntimeState, runId?: string, status: Message['status'] = 'running'): Message {
+  const normalizedRunId = runId || state.activeRunId || 'unknown'
+  let message = state.messages.find((item) => item.role === 'assistant' && item.runId === normalizedRunId)
+  if (!message) {
+    message = { role: 'assistant', content: '', toolPairs: [], runId: normalizedRunId, status }
+    state.messages.push(message)
+  }
+  message.status = status
+  return message
+}
+
+function markQueuedMessagesCancelled(state: SessionRuntimeState, content: string) {
+  for (const message of state.messages) {
+    if (message.role === 'assistant' && message.status === 'queued') {
+      message.status = 'cancelled'
+      message.content = content
+    }
+  }
+}
+
+function scrollIfActive(id: string) {
+  if (id === sessionId.value) {
+    messageListRef.value?.scrollToBottom()
   }
 }
 
