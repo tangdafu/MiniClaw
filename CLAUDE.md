@@ -33,9 +33,12 @@ Required/recognized variables:
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
-- `MINICLAW_CONTEXT_WINDOW_SIZE`
+- `MINICLAW_CONTEXT_COMPACT_TRIGGER_TOKENS`
+- `MINICLAW_CONTEXT_COMPACT_TARGET_TOKENS`
+- `MINICLAW_CONTEXT_SUMMARY_TARGET_TOKENS`
+- `MINICLAW_CONTEXT_COMPRESSION_MODEL`
 
-`OPENAI_BASE_URL` and `OPENAI_MODEL` default through `AgentConfig` to the OpenAI-compatible SDK behavior and `gpt-4o`; set them explicitly when using a non-OpenAI provider. `MINICLAW_CONTEXT_WINDOW_SIZE` defaults to 20 persisted messages and controls only model request assembly, not saved history.
+`OPENAI_BASE_URL` and `OPENAI_MODEL` default through `AgentConfig` to the OpenAI-compatible SDK behavior and `gpt-4o`; set them explicitly when using a non-OpenAI provider. Context loading is token-budget based: full history is sent below the trigger threshold, and older history is summarized into `model_context.json` when compaction is needed. This only affects model request assembly, not saved `chat.json` history.
 
 No backend test or lint command is currently configured in the repo.
 
@@ -62,7 +65,8 @@ npm run preview
 - `backend/miniclaw/claw.py` is the orchestration/session layer. `Claw.chat()` creates a session when needed, loads existing session messages, delegates the conversation loop to `Agent.chat()`, then saves the mutated message history through `SessionManager`.
 - `backend/miniclaw/agent.py` is now a facade. It preserves the public `Agent.chat(messages, user_message)` interface, owns `AgentConfig` and the OpenAI-compatible client, and delegates the actual ReAct loop to `ReactRuntime`.
 - `backend/miniclaw/react_runtime.py` is the internal ReAct orchestration loop. It appends the user message, builds model requests, calls the streaming Chat Completions API, emits ordered frontend events, appends assistant/tool messages to the same history list, and coordinates hook calls.
-- `backend/miniclaw/context_assembler.py` builds model request messages from persisted history. It applies the configurable sliding window, keeps the optional system prompt outside the window, repairs leading tool-message boundaries, and strips empty `reasoning_content` fields.
+- `backend/miniclaw/context_compression.py` builds model request messages from persisted history. It sends full history below the token trigger, summarizes older history into per-session `model_context.json` above the trigger, keeps the optional system prompt first, repairs leading tool-message boundaries in retained tails, and emits `context_usage` / `context_compression` events.
+- `backend/miniclaw/context_assembler.py` is a compatibility cleanup-only assembler that injects an optional system prompt and strips empty `reasoning_content` fields.
 - `backend/miniclaw/react_context.py` defines runtime data structures: `ReactContext`, `ModelRequest`, `ModelTurn`, and `ToolExecution`.
 - `backend/miniclaw/stream.py` contains `StreamAccumulator` and `ToolCallParser`, which reconstruct text, reasoning content, and OpenAI-style streamed tool calls from deltas.
 - `backend/miniclaw/tool_executor.py` owns tool lookup, JSON argument parsing, sync/async handler invocation, and conversion of tool failures into error strings.
@@ -100,7 +104,7 @@ The frontend sends only the current `session_id` and latest message. Conversatio
 
 ## Important implementation details
 
-- The API event types expected by the frontend are `session_created`, `text`, `reasoning`, `tool_call`, `tool_result`, `done`, and `error`.
+- The API event types expected by the frontend include `session_created`, `text`, `reasoning`, `tool_call`, `tool_result`, `context_usage`, `context_compression`, `done`, and `error`, plus session queue lifecycle events.
 - `Event.model_dump()` maps the internal `error_msg` field to an external `error` key; preserve this contract if changing error serialization.
 - `ToolCallParser` reconstructs streamed OpenAI-style tool call deltas by index and accumulates function arguments as strings before JSON parsing. It lives in `backend/miniclaw/stream.py` and remains re-exported through `miniclaw.agent` for compatibility.
 - `ReactRuntime` owns frontend event ordering. Hooks may inspect or mutate context/request objects, but they should not directly emit frontend events.

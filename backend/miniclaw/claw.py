@@ -5,6 +5,7 @@ import logging
 import shutil
 import uuid
 import asyncio
+import inspect
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,6 +66,9 @@ class SessionManager:
 
     def get_chat_file(self, session_id: str) -> Path:
         return self.sessions_dir / session_id / "chat.json"
+
+    def get_session_path(self, session_id: str) -> Path:
+        return self.sessions_dir / session_id
 
     def session_exists(self, session_id: str) -> bool:
         return self.get_chat_file(session_id).exists()
@@ -218,7 +222,7 @@ class Claw:
         messages = self.session_manager.load_messages(session_id)
 
         # 调用 Agent（Agent 负责追加 user_message、assistant、tool 消息）
-        async for event in self.agent.chat(messages, user_message):
+        async for event in self._agent_chat(messages, user_message, session_id):
             yield event
 
         # Agent 已完成对话循环，messages 已包含完整历史
@@ -333,7 +337,7 @@ class Claw:
     async def _execute_job(self, job: SessionJob) -> None:
         messages = self.session_manager.load_messages(job.session_id)
         try:
-            async for event in self.agent.chat(messages, job.message):
+            async for event in self._agent_chat(messages, job.message, job.session_id):
                 await job.emit(self._wrap_event(event, job.session_id, job.run_id))
         except asyncio.CancelledError:
             self.session_manager.save_messages(job.session_id, messages)
@@ -355,6 +359,16 @@ class Claw:
         payload["session_id"] = session_id
         payload["run_id"] = run_id
         return payload
+
+    def _agent_chat(self, messages: list[dict], user_message: str, session_id: str):
+        signature = inspect.signature(self.agent.chat)
+        if "session_dir" in signature.parameters:
+            return self.agent.chat(
+                messages,
+                user_message,
+                session_dir=self.session_manager.get_session_path(session_id),
+            )
+        return self.agent.chat(messages, user_message)
 
     async def _emit_queue_updated(self, session_id: str, emit: RunEmit) -> None:
         queue = self.session_queues.get(session_id)

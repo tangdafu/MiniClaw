@@ -45,6 +45,7 @@
         :disabled="!isConnected || !sessionId"
         :is-processing="activeRuntime.isProcessing"
         :queued-count="activeRuntime.queuedCount"
+        :context-usage="activeRuntime.contextUsage"
         placeholder="向 MiniClaw 提问，或描述你想完成的任务..."
         @send="sendMessage"
         @cancel-current="cancelCurrentRun"
@@ -76,7 +77,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import ChatInput from './ChatInput.vue'
 import MessageList from './MessageList.vue'
 import SessionSidebar from './SessionSidebar.vue'
-import type { Message, MessagePage, SessionSummary, StreamEvent, ToolCall } from '../types/chat'
+import type { ContextUsageEvent, Message, MessagePage, SessionSummary, StreamEvent, ToolCall } from '../types/chat'
 
 interface SessionRuntimeState {
   messages: Message[]
@@ -84,6 +85,7 @@ interface SessionRuntimeState {
   pendingToolCalls: Record<string, ToolCall>
   activeRunId: string
   queuedCount: number
+  contextUsage?: ContextUsageEvent
   nextBefore: number | null
   hasMore: boolean
   isLoadingHistory: boolean
@@ -110,6 +112,7 @@ const emptyRuntime: SessionRuntimeState = {
   pendingToolCalls: {},
   activeRunId: '',
   queuedCount: 0,
+  contextUsage: undefined,
   nextBefore: null,
   hasMore: false,
   isLoadingHistory: false,
@@ -389,6 +392,48 @@ function handleEvent(event: StreamEvent) {
       scrollIfActive(eventSessionId)
       break
 
+    case 'context_compression':
+      {
+        const message = ensureAssistantForRun(state, event.run_id, 'running')
+        message.compressionEvents = message.compressionEvents ?? []
+        message.compressionEvents.push({
+          stage: event.stage ?? '',
+          reason: event.reason,
+          detail: event.detail,
+          estimated_tokens: event.estimated_tokens,
+          trigger_tokens: event.trigger_tokens,
+          target_tokens: event.target_tokens,
+          head_messages: event.head_messages,
+          tail_messages: event.tail_messages,
+          covered_messages: event.covered_messages,
+          summary_tokens: event.summary_tokens,
+          estimated_tokens_after: event.estimated_tokens_after,
+        })
+      }
+      scrollIfActive(eventSessionId)
+      break
+
+    case 'context_usage':
+      state.contextUsage = {
+        stage: event.stage ?? '',
+        reason: event.reason,
+        estimated_tokens: event.estimated_tokens,
+        trigger_tokens: event.trigger_tokens,
+        target_tokens: event.target_tokens,
+        model_messages: event.model_messages,
+        history_messages: event.history_messages,
+        compacted: event.compacted,
+        cache_hit: event.cache_hit,
+        covered_messages: event.covered_messages,
+        summary_tokens: event.summary_tokens,
+        system_tokens: event.system_tokens,
+        summary_tokens_breakdown: event.summary_tokens_breakdown,
+        user_tokens: event.user_tokens,
+        assistant_tokens: event.assistant_tokens,
+        tool_tokens: event.tool_tokens,
+      }
+      break
+
     case 'tool_call':
       if (!event.run_id) return
       state.pendingToolCalls[event.run_id] = {
@@ -474,6 +519,7 @@ function createRuntimeState(): SessionRuntimeState {
     pendingToolCalls: {},
     activeRunId: '',
     queuedCount: 0,
+    contextUsage: undefined,
     nextBefore: null,
     hasMore: false,
     isLoadingHistory: false,

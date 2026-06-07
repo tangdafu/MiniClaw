@@ -13,9 +13,43 @@ export interface Message {
   content: string
   reasoning?: string
   toolPairs?: ToolPair[]
+  compressionEvents?: CompressionEvent[]
   isError?: boolean
   runId?: string
   status?: 'queued' | 'running' | 'cancelled' | 'done' | 'error'
+}
+
+export interface CompressionEvent {
+  stage: string
+  reason?: string
+  detail?: string
+  estimated_tokens?: number
+  trigger_tokens?: number
+  target_tokens?: number
+  head_messages?: number
+  tail_messages?: number
+  covered_messages?: number
+  summary_tokens?: number
+  estimated_tokens_after?: number
+}
+
+export interface ContextUsageEvent {
+  stage: string
+  reason?: string
+  estimated_tokens?: number
+  trigger_tokens?: number
+  target_tokens?: number
+  model_messages?: number
+  history_messages?: number
+  compacted?: boolean
+  cache_hit?: boolean
+  covered_messages?: number
+  summary_tokens?: number
+  system_tokens?: number
+  summary_tokens_breakdown?: number
+  user_tokens?: number
+  assistant_tokens?: number
+  tool_tokens?: number
 }
 
 export interface SessionSummary {
@@ -34,7 +68,7 @@ export interface MessagePage {
 }
 
 export interface StreamEvent {
-  type: 'text' | 'reasoning' | 'tool_call' | 'tool_result' | 'done' | 'error' | 'session_created' | 'queued' | 'queue_updated' | 'run_started' | 'cancelled' | 'queue_cleared' | 'session_stopped' | 'cancel_requested'
+  type: 'text' | 'reasoning' | 'tool_call' | 'tool_result' | 'done' | 'error' | 'session_created' | 'context_compression' | 'context_usage' | 'queued' | 'queue_updated' | 'run_started' | 'cancelled' | 'queue_cleared' | 'session_stopped' | 'cancel_requested'
   content?: string
   name?: string
   arguments?: string
@@ -48,4 +82,24 @@ export interface StreamEvent {
   queued_count?: number
   cleared_count?: number
   cancelled?: boolean
+  stage?: string
+  reason?: string
+  detail?: string
+  estimated_tokens?: number
+  trigger_tokens?: number
+  target_tokens?: number
+  head_messages?: number
+  tail_messages?: number
+  covered_messages?: number
+  summary_tokens?: number
+  estimated_tokens_after?: number
+  model_messages?: number
+  history_messages?: number
+  compacted?: boolean
+  cache_hit?: boolean
+  system_tokens?: number
+  summary_tokens_breakdown?: number
+  user_tokens?: number
+  assistant_tokens?: number
+  tool_tokens?: number
 }

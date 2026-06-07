@@ -46,13 +46,33 @@ class Tool(BaseModel):
 
 class Event(BaseModel):
     """Agent 流式事件"""
-    type: Literal["text", "reasoning", "tool_call", "tool_result", "done", "error", "session_created"]
+    type: Literal["text", "reasoning", "tool_call", "tool_result", "done", "error", "session_created", "context_compression", "context_usage"]
     content: str = ""
     name: str = ""           # 工具名称
     arguments: str = ""      # 工具参数
     result: str = ""         # 工具结果
     error_msg: str = ""      # 错误信息（字段名避免和静态方法冲突）
     session_id: str = ""     # 会话 ID（用于 session_created 事件）
+    stage: str = ""
+    reason: str = ""
+    detail: str = ""
+    estimated_tokens: int | None = None
+    trigger_tokens: int | None = None
+    target_tokens: int | None = None
+    head_messages: int | None = None
+    tail_messages: int | None = None
+    covered_messages: int | None = None
+    summary_tokens: int | None = None
+    estimated_tokens_after: int | None = None
+    model_messages: int | None = None
+    history_messages: int | None = None
+    compacted: bool | None = None
+    cache_hit: bool | None = None
+    system_tokens: int | None = None
+    summary_tokens_breakdown: int | None = None
+    user_tokens: int | None = None
+    assistant_tokens: int | None = None
+    tool_tokens: int | None = None
 
     @staticmethod
     def text(content: str) -> "Event":
@@ -81,6 +101,14 @@ class Event(BaseModel):
     @staticmethod
     def session_created(session_id: str) -> "Event":
         return Event(type="session_created", session_id=session_id)
+
+    @staticmethod
+    def context_compression(**kwargs) -> "Event":
+        return Event(type="context_compression", **kwargs)
+
+    @staticmethod
+    def context_usage(**kwargs) -> "Event":
+        return Event(type="context_usage", **kwargs)
 
     def model_dump(self, **kwargs) -> dict:
         """自定义序列化，将 error_msg 映射为 error 键"""

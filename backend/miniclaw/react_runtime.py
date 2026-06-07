@@ -3,7 +3,9 @@ from typing import AsyncIterator
 
 from openai import AsyncOpenAI
 
-from .context_assembler import ContextAssembler
+from pathlib import Path
+
+from .context_compression import ContextCompressionService, PreparedContext
 from .hooks import BaseHook, HookManager
 from .react_context import ModelRequest, ReactContext
 from .stream import StreamAccumulator
@@ -21,7 +23,7 @@ class ReactRuntime:
             tools: list[Tool] | None = None,
             system_prompt: str | None = None,
             max_iterations: int = 20,
-            context_window_size: int = 20,
+            context_compression=None,
             hooks: list[BaseHook] | HookManager | None = None,
     ):
         self.client = client
@@ -29,15 +31,25 @@ class ReactRuntime:
         self.tools = tools or []
         self.system_prompt = system_prompt
         self.max_iterations = max_iterations
-        self.context_window_size = context_window_size
-        self.context_assembler = ContextAssembler(
+        self.context_compression_config = context_compression
+        self.context_compressor = ContextCompressionService(
+            client=self.client,
+            model=self.model,
             system_prompt=self.system_prompt,
-            window_size=self.context_window_size,
+            trigger_tokens=context_compression.trigger_tokens,
+            target_tokens=context_compression.target_tokens,
+            summary_target_tokens=context_compression.summary_target_tokens,
+            compression_model=context_compression.compression_model,
         )
         self.hooks = hooks if isinstance(hooks, HookManager) else HookManager(hooks)
         self.tool_executor = ToolExecutor(self.tools)
 
-    async def run(self, messages: list[dict], user_message: str) -> AsyncIterator[Event]:
+    async def run(
+        self,
+        messages: list[dict],
+        user_message: str,
+        session_dir: Path | None = None,
+    ) -> AsyncIterator[Event]:
         ctx = ReactContext(
             messages=messages,
             user_message=user_message,
@@ -58,7 +70,14 @@ class ReactRuntime:
                 await self.hooks.before_iteration(ctx)
 
                 await self.hooks.before_build_messages(ctx)
-                model_messages = self._build_messages(ctx)
+                model_messages = None
+                async for item in self._build_messages(ctx, session_dir):
+                    if isinstance(item, Event):
+                        yield item
+                    else:
+                        model_messages = item.messages
+                if model_messages is None:
+                    raise RuntimeError("Context preparation did not produce model messages")
                 await self.hooks.after_build_messages(ctx, model_messages)
 
                 request = ModelRequest(
@@ -124,8 +143,13 @@ class ReactRuntime:
             await self.hooks.on_error(ctx, exc)
             yield Event.error(str(exc))
 
-    def _build_messages(self, ctx: ReactContext) -> list[dict]:
-        return self.context_assembler.build(ctx.messages)
+    async def _build_messages(
+        self,
+        ctx: ReactContext,
+        session_dir: Path | None,
+    ) -> AsyncIterator[Event | PreparedContext]:
+        async for item in self.context_compressor.prepare(ctx.messages, session_dir=session_dir):
+            yield item
 
     def _get_tool_schemas(self, ctx: ReactContext) -> list[dict] | None:
         if not ctx.tools:

@@ -6,6 +6,19 @@
       <div v-else-if="message.isError" class="error-text">{{ message.content }}</div>
       <template v-else>
         <ReasoningBlock v-if="message.reasoning" :reasoning="message.reasoning" />
+        <section v-if="message.compressionEvents?.length" class="compression-block">
+          <button class="compression-title" @click="isCompressionOpen = !isCompressionOpen">
+            <span>{{ isCompressionOpen ? '⌄' : '›' }}</span>
+            上下文压缩
+            <small>{{ message.compressionEvents.length }} 个阶段</small>
+          </button>
+          <ul v-if="isCompressionOpen">
+            <li v-for="(event, index) in message.compressionEvents" :key="index">
+              <strong>{{ event.stage }}</strong>
+              <span>{{ compressionDetail(event) }}</span>
+            </li>
+          </ul>
+        </section>
         <ToolTimeline v-if="message.toolPairs?.length" :tool-pairs="message.toolPairs" />
         <MarkdownContent v-if="message.content" :content="message.content" />
         <div v-else class="stream-placeholder">{{ placeholderText }}</div>
@@ -15,15 +28,17 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import MarkdownContent from './MarkdownContent.vue'
 import ReasoningBlock from './ReasoningBlock.vue'
 import ToolTimeline from './ToolTimeline.vue'
-import type { Message } from '../types/chat'
+import type { CompressionEvent, Message } from '../types/chat'
 
 const props = defineProps<{
   message: Message
 }>()
+
+const isCompressionOpen = ref(false)
 
 const avatarLabel = computed(() => {
   if (props.message.isError) return '!'
@@ -35,6 +50,19 @@ const placeholderText = computed(() => {
   if (props.message.status === 'cancelled') return '已停止生成'
   return '正在生成回复...'
 })
+
+function compressionDetail(event: CompressionEvent): string {
+  const parts = []
+  if (event.reason) parts.push(event.reason)
+  if (event.estimated_tokens) parts.push(`估算 ${event.estimated_tokens}`)
+  if (event.head_messages !== undefined && event.tail_messages !== undefined) {
+    parts.push(`压缩 ${event.head_messages} 条，保留 ${event.tail_messages} 条`)
+  }
+  if (event.summary_tokens) parts.push(`摘要 ${event.summary_tokens}`)
+  if (event.estimated_tokens_after) parts.push(`压缩后 ${event.estimated_tokens_after}`)
+  if (event.detail) parts.push(event.detail)
+  return parts.join(' · ')
+}
 
 </script>
 
@@ -114,6 +142,47 @@ const placeholderText = computed(() => {
 .stream-placeholder {
   color: var(--text-tertiary);
   font-size: 14px;
+}
+
+.compression-block {
+  margin-bottom: var(--space-3);
+  border: 1px solid #fde68a;
+  border-radius: var(--radius-lg);
+  background: #fffbeb;
+  overflow: hidden;
+}
+
+.compression-title {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 9px 11px;
+  border: 0;
+  background: transparent;
+  color: #92400e;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.compression-title small {
+  margin-left: auto;
+  color: #b45309;
+}
+
+.compression-block ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0 12px 12px 30px;
+  color: #78350f;
+  font-size: 12px;
+}
+
+.compression-block li span {
+  margin-left: 6px;
+  color: #92400e;
 }
 
 @media (max-width: 720px) {

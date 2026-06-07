@@ -281,7 +281,10 @@ async for event in agent.chat(messages, "你好"):
 | `OPENAI_API_KEY` | OpenAI 兼容 API 的密钥 | - |
 | `OPENAI_BASE_URL` | API 基础 URL | `https://api.openai.com/v1` |
 | `OPENAI_MODEL` | 使用的模型 | `gpt-4o` |
-| `MINICLAW_CONTEXT_WINDOW_SIZE` | 每次发给模型的最近历史消息条数，不包含 system prompt；完整会话历史仍会保存 | `20` |
+| `MINICLAW_CONTEXT_COMPACT_TRIGGER_TOKENS` | 估算输入 token 超过该值时触发上下文压缩 | `180000` |
+| `MINICLAW_CONTEXT_COMPACT_TARGET_TOKENS` | 压缩后模型上下文的目标估算 token | `90000` |
+| `MINICLAW_CONTEXT_SUMMARY_TARGET_TOKENS` | 为摘要预留的估算 token | `8000` |
+| `MINICLAW_CONTEXT_COMPRESSION_MODEL` | 可选摘要压缩模型；为空时使用聊天模型 | - |
 
 ## 技术栈
 

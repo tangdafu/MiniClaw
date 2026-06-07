@@ -25,7 +25,10 @@ uv run python main.py
 | `OPENAI_API_KEY` | OpenAI 兼容 API Key |
 | `OPENAI_BASE_URL` | OpenAI 兼容 API Base URL |
 | `OPENAI_MODEL` | 模型名称，未设置时默认 `gpt-4o` |
-| `MINICLAW_CONTEXT_WINDOW_SIZE` | 模型请求上下文窗口大小，默认 `20` 条持久化消息 |
+| `MINICLAW_CONTEXT_COMPACT_TRIGGER_TOKENS` | 估算输入 token 超过该值时触发上下文压缩，默认 `180000` |
+| `MINICLAW_CONTEXT_COMPACT_TARGET_TOKENS` | 压缩后模型上下文目标估算 token，默认 `90000` |
+| `MINICLAW_CONTEXT_SUMMARY_TARGET_TOKENS` | 为摘要预留的估算 token，默认 `8000` |
+| `MINICLAW_CONTEXT_COMPRESSION_MODEL` | 可选摘要压缩模型；未设置时使用聊天模型 |
 | `MINICLAW_MEMORY_DIR` | 长期记忆目录，默认 `backend/memories` |
 | `MINICLAW_EMBEDDING_MODEL` | 可选 Embedding 模型；未设置时 vector 搜索不可用 |
 | `MINICLAW_EMBEDDING_BASE_URL` | 可选 Embedding API Base URL |
@@ -207,12 +210,13 @@ Claw 保存完整 messages 到 chat.json
 关键行为：
 
 - 用户消息会先追加到传入的 `messages` 列表。
-- 每轮模型调用前会通过 `ContextAssembler` 构建 `model_messages`，并注入可选 `system_prompt`。
-- `ContextAssembler` 默认只选取最近 `20` 条持久化消息作为模型上下文，可通过 `MINICLAW_CONTEXT_WINDOW_SIZE` 配置。
-- `system_prompt` 不计入滑动窗口，配置后始终位于模型请求最前面。
-- 滑动窗口只影响发给模型的临时 `model_messages`，不会裁剪 `ctx.messages` 或 `chat.json` 中保存的完整历史。
-- 如果窗口边界切到 tool 消息，装配器会尽量补入匹配的 assistant `tool_calls` 消息，避免产生孤立 tool 消息。
+- 每轮模型调用前会通过 `ContextCompressionService` 构建 `model_messages`，并注入可选 `system_prompt`。
+- 未超过 token 触发阈值时发送完整持久化历史；超过阈值时生成摘要并保留最近完整消息尾部。
+- `system_prompt` 始终位于模型请求最前面；压缩摘要作为第二条 `system` message 注入。
+- 上下文压缩只影响发给模型的临时 `model_messages`，不会裁剪 `ctx.messages` 或 `chat.json` 中保存的完整历史。
+- 如果保留尾部边界切到 tool 消息，压缩服务会尽量补入匹配的 assistant `tool_calls` 消息，避免产生孤立 tool 消息。
 - 空字符串 `reasoning_content` 会在发给模型前移除，减少 OpenAI 兼容接口报错风险。
+- 每次模型调用前都会发出 `context_usage` 事件；真正触发压缩时还会发出 `context_compression` 阶段事件。
 - 模型流式返回时，正文和 reasoning 会立即转换成前端事件。
 - 工具调用 delta 会先累积，等模型本轮流结束后再执行。
 - 如果 assistant 发起工具调用，持久化的 assistant 消息会包含 `tool_calls` 字段，并且位于对应 `role: "tool"` 消息之前。
@@ -391,6 +395,6 @@ backend/sessions/<session_id>/chat.json
 
 - 会话存储仍是同步 JSON 文件读写，没有并发写保护。
 - `execute_command` 使用 `shell=True`，需要额外安全治理后才适合更开放的使用场景。
-- 当前上下文窗口按消息条数裁剪，不是 token 精确预算；超长单条消息仍可能超过模型上下文限制。
+- 上下文 token 使用量为保守估算，不是具体模型 tokenizer 的精确计数；超长单条消息仍可能超过模型上下文限制。
 - Skill frontmatter 解析是轻量正则解析，不是完整 YAML 解析器。
 - WebSocket 错误处理较简单，异常时会关闭连接。
