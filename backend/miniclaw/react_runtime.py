@@ -111,6 +111,7 @@ class ReactRuntime:
                 await self.hooks.after_assistant_message(ctx, turn.assistant_message)
 
                 if not turn.tool_calls:
+                    yield self.context_compressor.usage_for_saved_messages(ctx.messages, session_dir=session_dir)
                     await self.hooks.before_save(ctx)
                     await self.hooks.on_run_end(ctx)
                     yield Event.done()

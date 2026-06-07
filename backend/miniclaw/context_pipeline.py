@@ -180,7 +180,7 @@ class HistoryCompactionStep:
         context_builder: ModelContextBuilder,
         hash_messages,
     ) -> HistoryCompactionResult:
-        summary = await self.summarize(cache, model_base_messages, selection.tail_start, hash_messages)
+        summary = await self.summarize(cache, clean_messages, model_base_messages, selection.tail_start, hash_messages)
         summary_message = {"role": "system", "content": summary}
         compacted_context = context_builder.build(system_messages, summary_message, selection.tail_messages)
         after_tokens = estimate_messages_tokens(compacted_context)
@@ -202,14 +202,21 @@ class HistoryCompactionStep:
             estimated_tokens_after=after_tokens,
         )
 
-    async def summarize(self, cache: Any, messages: list[dict[str, Any]], tail_start: int, hash_messages) -> str:
-        if cache and cache.covered_hash == hash_messages(messages[:cache.covers_until_index]) and tail_start > cache.covers_until_index:
+    async def summarize(
+        self,
+        cache: Any,
+        clean_messages: list[dict[str, Any]],
+        model_base_messages: list[dict[str, Any]],
+        tail_start: int,
+        hash_messages,
+    ) -> str:
+        if cache and cache.covered_hash == hash_messages(clean_messages[:cache.covers_until_index]) and tail_start > cache.covers_until_index:
             source = [
                 {"role": "system", "content": cache.summary_message.get("content", "")},
-                *messages[cache.covers_until_index:tail_start],
+                *model_base_messages[cache.covers_until_index:tail_start],
             ]
         else:
-            source = messages[:tail_start]
+            source = model_base_messages[:tail_start]
 
         response = await self.model_gateway.create_chat_completion(
             model=self.compression_model,
