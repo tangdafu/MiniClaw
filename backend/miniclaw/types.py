@@ -46,7 +46,7 @@ class Tool(BaseModel):
 
 class Event(BaseModel):
     """Agent 流式事件"""
-    type: Literal["text", "reasoning", "tool_call", "tool_result", "done", "error", "session_created", "context_compression", "context_usage"]
+    type: Literal["text", "reasoning", "tool_call", "tool_result", "done", "error", "session_created", "context_compression", "context_usage", "context_pruning"]
     content: str = ""
     name: str = ""           # 工具名称
     arguments: str = ""      # 工具参数
@@ -73,6 +73,13 @@ class Event(BaseModel):
     user_tokens: int | None = None
     assistant_tokens: int | None = None
     tool_tokens: int | None = None
+    prune_id: str = ""
+    tool_name: str = ""
+    tool_call_id: str = ""
+    original_tokens: int | None = None
+    retained_tokens: int | None = None
+    omitted_tokens: int | None = None
+    message_index: int | None = None
 
     @staticmethod
     def text(content: str) -> "Event":
@@ -109,6 +116,10 @@ class Event(BaseModel):
     @staticmethod
     def context_usage(**kwargs) -> "Event":
         return Event(type="context_usage", **kwargs)
+
+    @staticmethod
+    def context_pruning(**kwargs) -> "Event":
+        return Event(type="context_pruning", **kwargs)
 
     def model_dump(self, **kwargs) -> dict:
         """自定义序列化，将 error_msg 映射为 error 键"""

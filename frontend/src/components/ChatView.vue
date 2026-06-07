@@ -1,5 +1,5 @@
 <template>
-  <div class="chat-workspace">
+  <div class="chat-workspace" :class="{ 'usage-open': usagePanelOpen && activeRuntime.contextUsage }">
     <SessionSidebar
       :sessions="sessions"
       :active-session-id="sessionId"
@@ -51,8 +51,68 @@
         @cancel-current="cancelCurrentRun"
         @clear-queue="clearActiveQueue"
         @stop-session="stopActiveSession"
+        @show-context-usage="usagePanelOpen = true"
       />
     </section>
+
+    <aside v-if="usagePanelOpen && activeContextUsage" class="usage-panel" aria-label="上下文压缩详情">
+      <header>
+        <div>
+          <p>Context Budget</p>
+          <h3>上下文压缩详情</h3>
+        </div>
+        <button type="button" @click="usagePanelOpen = false">关闭</button>
+      </header>
+      <div class="usage-summary">
+        <strong>{{ formatTokens(activeContextUsage.estimated_tokens) }}</strong>
+        <span>占触发阈值 {{ usagePercent }}%</span>
+      </div>
+      <div class="usage-progress"><span :style="{ width: `${usagePercent}%` }"></span></div>
+      <dl class="usage-meta">
+        <div>
+          <dt>触发阈值</dt>
+          <dd>{{ formatTokens(activeContextUsage.trigger_tokens) }}</dd>
+        </div>
+        <div>
+          <dt>压缩目标</dt>
+          <dd>{{ formatTokens(activeContextUsage.target_tokens) }}</dd>
+        </div>
+        <div>
+          <dt>模型消息</dt>
+          <dd>{{ activeContextUsage.model_messages ?? 0 }} 条</dd>
+        </div>
+        <div>
+          <dt>历史消息</dt>
+          <dd>{{ activeContextUsage.history_messages ?? 0 }} 条</dd>
+        </div>
+      </dl>
+      <div class="breakdown-list">
+        <div v-for="item in usageBreakdownRows" :key="item.label" class="breakdown-row">
+          <div>
+            <strong>{{ item.label }}</strong>
+            <span>{{ item.description }}</span>
+          </div>
+          <span>{{ formatTokens(item.value) }}</span>
+        </div>
+      </div>
+      <section v-if="activePruningEvents.length" class="pruning-section">
+        <h4>工具结果剪枝</h4>
+        <div v-for="event in activePruningEvents" :key="event.prune_id || `${event.tool_call_id}-${event.message_index}`" class="pruning-card">
+          <div>
+            <strong>{{ event.tool_name || 'tool' }}</strong>
+            <code>{{ event.prune_id }}</code>
+          </div>
+          <dl>
+            <span>原始 {{ formatTokens(event.original_tokens) }}</span>
+            <span>保留 {{ formatTokens(event.retained_tokens) }}</span>
+            <span>省略 {{ formatTokens(event.omitted_tokens) }}</span>
+          </dl>
+        </div>
+      </section>
+      <p class="usage-note">
+        {{ activeContextUsage.compacted ? (activeContextUsage.cache_hit ? '当前使用已缓存摘要。' : '当前上下文已压缩。') : '当前使用完整会话历史。' }}
+      </p>
+    </aside>
 
     <div v-if="deleteTarget" class="modal-backdrop" @click="cancelDelete">
       <section class="delete-modal" role="dialog" aria-modal="true" aria-labelledby="delete-title" @click.stop>
@@ -77,7 +137,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import ChatInput from './ChatInput.vue'
 import MessageList from './MessageList.vue'
 import SessionSidebar from './SessionSidebar.vue'
-import type { ContextUsageEvent, Message, MessagePage, SessionSummary, StreamEvent, ToolCall } from '../types/chat'
+import type { ContextPruningEvent, ContextUsageEvent, Message, MessagePage, SessionSummary, StreamEvent, ToolCall } from '../types/chat'
 
 interface SessionRuntimeState {
   messages: Message[]
@@ -86,6 +146,7 @@ interface SessionRuntimeState {
   activeRunId: string
   queuedCount: number
   contextUsage?: ContextUsageEvent
+  pruningEvents: ContextPruningEvent[]
   nextBefore: number | null
   hasMore: boolean
   isLoadingHistory: boolean
@@ -102,6 +163,7 @@ const sessionId = ref('')
 const messageListRef = ref<InstanceType<typeof MessageList>>()
 const chatInputRef = ref<InstanceType<typeof ChatInput>>()
 const deleteTarget = ref<SessionSummary | null>(null)
+const usagePanelOpen = ref(false)
 
 let ws: WebSocket | null = null
 let shouldReconnect = true
@@ -113,6 +175,7 @@ const emptyRuntime: SessionRuntimeState = {
   activeRunId: '',
   queuedCount: 0,
   contextUsage: undefined,
+  pruningEvents: [],
   nextBefore: null,
   hasMore: false,
   isLoadingHistory: false,
@@ -125,6 +188,24 @@ const activeTitle = computed(() => {
 
 const activeRuntime = computed(() => sessionId.value ? ensureSessionState(sessionId.value) : emptyRuntime)
 const activeMessages = computed(() => activeRuntime.value.messages)
+const activeContextUsage = computed(() => activeRuntime.value.contextUsage)
+const activePruningEvents = computed(() => activeRuntime.value.pruningEvents)
+const usagePercent = computed(() => {
+  const used = activeContextUsage.value?.estimated_tokens ?? 0
+  const total = activeContextUsage.value?.trigger_tokens ?? 0
+  if (total <= 0) return 0
+  return Math.min(100, Math.round((used / total) * 100))
+})
+const usageBreakdownRows = computed(() => {
+  const usage = activeContextUsage.value
+  return [
+    { label: '系统提示词', description: '动态 system prompt', value: usage?.system_tokens },
+    { label: '摘要', description: 'model_context.json 压缩摘要', value: usage?.summary_tokens_breakdown ?? usage?.summary_tokens },
+    { label: '用户输入', description: 'role=user 的消息', value: usage?.user_tokens },
+    { label: 'Assistant', description: 'assistant 回复和 tool_calls', value: usage?.assistant_tokens },
+    { label: '工具返回', description: 'role=tool 的工具结果', value: usage?.tool_tokens },
+  ]
+})
 const runningSessionIds = computed(() => Object.entries(sessionStates.value)
   .filter(([, state]) => state.isProcessing)
   .map(([id]) => id))
@@ -261,6 +342,7 @@ async function selectSession(id: string) {
   if (!state.hasLoadedHistory && state.messages.length === 0) {
     await loadLatestMessages(id)
   } else {
+    void loadContextUsage(id)
     await nextTick()
     messageListRef.value?.scrollToBottom()
   }
@@ -277,6 +359,7 @@ async function loadLatestMessages(id: string) {
     state.nextBefore = page.next_before
     state.hasMore = page.has_more
     state.hasLoadedHistory = true
+    void loadContextUsage(id)
     messageListRef.value?.scrollToBottom()
   } catch (error) {
     globalError.value = error instanceof Error ? error.message : '加载消息失败'
@@ -311,6 +394,16 @@ async function fetchMessagePage(id: string, before?: number): Promise<MessagePag
   const params = new URLSearchParams({ limit: '20' })
   if (before !== undefined) params.set('before', String(before))
   return await fetchJson<MessagePage>(`/sessions/${encodeURIComponent(id)}/messages?${params}`)
+}
+
+async function loadContextUsage(id: string) {
+  const state = ensureSessionState(id)
+  try {
+    const usage = await fetchJson<ContextUsageEvent>(`/sessions/${encodeURIComponent(id)}/context-usage`)
+    state.contextUsage = usage
+  } catch {
+    state.contextUsage = undefined
+  }
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -434,6 +527,20 @@ function handleEvent(event: StreamEvent) {
       }
       break
 
+    case 'context_pruning':
+      state.pruningEvents.push({
+        stage: event.stage ?? '',
+        reason: event.reason,
+        prune_id: event.prune_id,
+        tool_name: event.tool_name,
+        tool_call_id: event.tool_call_id,
+        original_tokens: event.original_tokens,
+        retained_tokens: event.retained_tokens,
+        omitted_tokens: event.omitted_tokens,
+        message_index: event.message_index,
+      })
+      break
+
     case 'tool_call':
       if (!event.run_id) return
       state.pendingToolCalls[event.run_id] = {
@@ -520,6 +627,7 @@ function createRuntimeState(): SessionRuntimeState {
     activeRunId: '',
     queuedCount: 0,
     contextUsage: undefined,
+    pruningEvents: [],
     nextBefore: null,
     hasMore: false,
     isLoadingHistory: false,
@@ -558,6 +666,11 @@ function scrollIfActive(id: string) {
   if (id === sessionId.value) {
     messageListRef.value?.scrollToBottom()
   }
+}
+
+function formatTokens(value?: number): string {
+  if (!value) return '0 tokens'
+  return `${value.toLocaleString()} tokens`
 }
 
 onMounted(() => {
@@ -678,6 +791,212 @@ onUnmounted(() => {
   font-weight: 700;
 }
 
+.usage-panel {
+  position: fixed;
+  top: var(--space-5);
+  right: var(--space-5);
+  bottom: var(--space-5);
+  z-index: 45;
+  width: min(420px, calc(100vw - var(--space-10)));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  border: 1px solid rgba(191, 219, 254, 0.9);
+  border-radius: var(--radius-2xl);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 28px 80px rgba(15, 23, 42, 0.22);
+  overflow: auto;
+}
+
+.usage-panel header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.usage-panel header p {
+  margin: 0 0 4px;
+  color: #2563eb;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.usage-panel h3 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 20px;
+  line-height: 1.25;
+  letter-spacing: -0.04em;
+}
+
+.usage-panel header button {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text-secondary);
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.usage-summary {
+  display: grid;
+  gap: 4px;
+}
+
+.usage-summary strong {
+  color: var(--text-strong);
+  font-size: 28px;
+  line-height: 1.1;
+  letter-spacing: -0.05em;
+}
+
+.usage-summary span,
+.usage-note {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.usage-progress {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dbeafe;
+}
+
+.usage-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2563eb, #7c3aed);
+}
+
+.usage-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.usage-meta div {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: #f8fafc;
+}
+
+.usage-meta dt {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.usage-meta dd {
+  margin: 4px 0 0;
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.breakdown-list {
+  display: grid;
+  gap: 8px;
+}
+
+.breakdown-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 10px 12px;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: var(--radius-lg);
+  background: #fff;
+}
+
+.breakdown-row div {
+  display: grid;
+  gap: 2px;
+}
+
+.breakdown-row strong {
+  color: var(--text-strong);
+  font-size: 13px;
+}
+
+.breakdown-row div span {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.breakdown-row > span {
+  color: #1d4ed8;
+  font-size: 13px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.usage-note {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-lg);
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.pruning-section {
+  display: grid;
+  gap: 8px;
+}
+
+.pruning-section h4 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 14px;
+}
+
+.pruning-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid #fed7aa;
+  border-radius: var(--radius-lg);
+  background: #fff7ed;
+}
+
+.pruning-card > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.pruning-card strong {
+  color: #9a3412;
+  font-size: 13px;
+}
+
+.pruning-card code {
+  color: #c2410c;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.pruning-card dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+}
+
+.pruning-card span {
+  color: #9a3412;
+  font-size: 11px;
+}
+
 @media (max-width: 820px) {
   .chat-workspace {
     grid-template-columns: 1fr;
@@ -688,6 +1007,12 @@ onUnmounted(() => {
   .panel-header {
     align-items: flex-start;
     padding: var(--space-4);
+  }
+
+  .usage-panel {
+    inset: var(--space-3) var(--space-3) var(--space-3) auto;
+    width: min(380px, calc(100vw - var(--space-6)));
+    box-shadow: 0 28px 80px rgba(15, 23, 42, 0.28);
   }
 }
 

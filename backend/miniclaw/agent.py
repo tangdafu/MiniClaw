@@ -11,11 +11,31 @@ from .types import Event, Tool
 
 
 @dataclass(frozen=True)
+class ToolResultPruningConfig:
+    trigger_tokens: int = 12_000
+    keep_tokens: int = 2_000
+    total_ratio: float = 0.30
+    target_ratio: float = 0.20
+    read_max_chars: int = 20_000
+
+    @classmethod
+    def from_env(cls) -> "ToolResultPruningConfig":
+        return cls(
+            trigger_tokens=_positive_int_env("MINICLAW_TOOL_RESULT_PRUNE_TRIGGER_TOKENS", 12_000),
+            keep_tokens=_positive_int_env("MINICLAW_TOOL_RESULT_PRUNE_KEEP_TOKENS", 2_000),
+            total_ratio=_positive_float_env("MINICLAW_TOOL_RESULT_PRUNE_TOTAL_RATIO", 0.30),
+            target_ratio=_positive_float_env("MINICLAW_TOOL_RESULT_PRUNE_TARGET_RATIO", 0.20),
+            read_max_chars=_positive_int_env("MINICLAW_PRUNED_TOOL_RESULT_READ_MAX_CHARS", 20_000),
+        )
+
+
+@dataclass(frozen=True)
 class ContextCompressionConfig:
     trigger_tokens: int = 180_000
     target_tokens: int = 90_000
     summary_target_tokens: int = 8_000
     compression_model: str | None = None
+    tool_result_pruning: ToolResultPruningConfig = ToolResultPruningConfig()
 
     @classmethod
     def from_env(cls) -> "ContextCompressionConfig":
@@ -24,12 +44,21 @@ class ContextCompressionConfig:
             target_tokens=_positive_int_env("MINICLAW_CONTEXT_COMPACT_TARGET_TOKENS", 90_000),
             summary_target_tokens=_positive_int_env("MINICLAW_CONTEXT_SUMMARY_TARGET_TOKENS", 8_000),
             compression_model=os.getenv("MINICLAW_CONTEXT_COMPRESSION_MODEL") or None,
+            tool_result_pruning=ToolResultPruningConfig.from_env(),
         )
 
 
 def _positive_int_env(name: str, default: int) -> int:
     try:
         value = int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
     except ValueError:
         return default
     return value if value > 0 else default

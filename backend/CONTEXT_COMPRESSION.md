@@ -11,9 +11,10 @@ MiniClaw 的持久化会话历史存放在 `backend/sessions/<session_id>/chat.j
 - 未超过 token 触发阈值时，发送完整会话历史。
 - 超过阈值时，用模型生成旧历史摘要，并保留最近一段完整消息尾部。
 - 摘要缓存写入同一 session 目录下的 `model_context.json`。
+- 超过阈值的工具结果会先被剪枝成可恢复标记，索引写入 `pruned_tool_results.json`。
 - 原始动态 system prompt 始终在第一条；压缩摘要作为第二条 `system` message 注入。
 - 所有选择都按完整消息边界进行，不拆分单条消息。
-- 当前 V1 没有实现工具结果级别的占位剪枝；已实现的是尾部选择和工具消息边界修复。
+- 工具结果剪枝只影响模型请求上下文，`chat.json` 和前端历史仍保留完整结果。
 
 ## 入口链路
 
@@ -61,6 +62,11 @@ class ContextCompressionConfig:
 - `MINICLAW_CONTEXT_COMPACT_TARGET_TOKENS`：压缩后模型上下文目标 token，默认 `90000`。
 - `MINICLAW_CONTEXT_SUMMARY_TARGET_TOKENS`：为摘要预留的估算 token，默认 `8000`。
 - `MINICLAW_CONTEXT_COMPRESSION_MODEL`：摘要生成模型；未配置时使用主聊天模型。
+- `MINICLAW_TOOL_RESULT_PRUNE_TRIGGER_TOKENS`：单条工具结果达到该内容 token 数时剪枝，默认 `12000`。
+- `MINICLAW_TOOL_RESULT_PRUNE_KEEP_TOKENS`：剪枝后保留的 preview 内容 token，默认 `2000`。
+- `MINICLAW_TOOL_RESULT_PRUNE_TOTAL_RATIO`：工具结果总量超过触发阈值比例时触发聚合剪枝，默认 `0.30`。
+- `MINICLAW_TOOL_RESULT_PRUNE_TARGET_RATIO`：聚合剪枝后目标工具结果总量比例，默认 `0.20`。
+- `MINICLAW_PRUNED_TOOL_RESULT_READ_MAX_CHARS`：恢复工具单次最大读取字符数，默认 `20000`。
 
 旧的 `MINICLAW_CONTEXT_WINDOW_SIZE` 和消息条数滑动窗口不再作为活跃上下文加载机制。
 
@@ -73,6 +79,60 @@ class ContextCompressionConfig:
 - `estimate_messages_tokens(messages)`：对消息列表求和。
 
 这是保守估算，不等同于具体模型 tokenizer 的精确计数。它用于决定是否压缩、选择尾部消息范围和向前端报告上下文使用情况。
+
+## 工具结果剪枝
+
+在摘要压缩之前，`ContextCompressionService.prepare(...)` 会先调用工具结果剪枝器。剪枝器扫描 `role: tool` 消息，并通过前序 assistant `tool_calls` 找到工具名和调用参数。
+
+剪枝触发有两类：
+
+- 单条工具结果达到 `MINICLAW_TOOL_RESULT_PRUNE_TRIGGER_TOKENS`。
+- 所有工具结果总量达到 `MINICLAW_TOOL_RESULT_PRUNE_TOTAL_RATIO * MINICLAW_CONTEXT_COMPACT_TRIGGER_TOKENS`，此时优先剪最大的工具结果，直到接近目标比例。
+
+剪枝后的模型上下文不会包含完整工具结果，而是包含结构化标记：
+
+```text
+[MINICLAW_PRUNED_TOOL_RESULT]
+prune_id: ptr_...
+tool_call_id: call_...
+tool_name: execute_command
+original_tokens: 48321
+retained_preview_tokens: 2000
+omitted_tokens: 46321
+
+Preview:
+...
+
+To inspect omitted content, call read_pruned_tool_result with:
+{"prune_id":"ptr_...","offset":0,"limit":8000}
+[/MINICLAW_PRUNED_TOOL_RESULT]
+```
+
+这个标记仍是合法 `role: tool` 消息，并保留原始 `tool_call_id`，因此不会破坏 OpenAI tool-call 协议边界。模型如果需要查看省略内容，可以调用 `read_pruned_tool_result`。
+
+## pruned_tool_results.json
+
+每个 session 可以有一个 `pruned_tool_results.json`：
+
+```json
+{
+  "version": 1,
+  "results": {
+    "ptr_7f3a91c2d8b4": {
+      "prune_id": "ptr_7f3a91c2d8b4",
+      "message_index": 18,
+      "tool_call_id": "call_abc",
+      "tool_name": "execute_command",
+      "content_hash": "sha256(...)" ,
+      "original_estimated_tokens": 48321,
+      "created_at": "...",
+      "updated_at": "..."
+    }
+  }
+}
+```
+
+索引只保存定位和 hash，不复制完整工具结果。恢复工具读取时会加载 `chat.json`，检查 message index、`tool_call_id` 和内容 hash，匹配后返回指定片段；如果历史被手动修改导致 hash 不匹配，会返回失效错误。
 
 ## 三条准备路径
 
@@ -126,7 +186,7 @@ tail_messages = clean_messages[tail_start:]
 
 `_repair_tail_start(...)` 处理 OpenAI tool-call 协议边界。如果 tail 第一条是 `role: tool`，服务会向前查找对应的 assistant `tool_calls` 消息，并把 tail 起点提前到那条 assistant 消息，避免模型请求中出现孤立 tool 消息。
 
-这就是当前已经实现的“剪枝”范围：保留最近完整尾部，旧消息被摘要替代，并修复工具调用边界。当前代码没有把单个超长 tool result 替换成占位符，也没有实现 `retrieve_tool_result` 这类按需恢复工具结果的机制。
+这就是历史摘要层面的“剪枝”范围：保留最近完整尾部，旧消息被摘要替代，并修复工具调用边界。工具结果剪枝发生在这个步骤之前，只替换模型上下文中的大工具结果。
 
 ## 摘要生成
 
@@ -211,6 +271,16 @@ class ModelContextCache:
 - `completed`：摘要完成并写入缓存。
 - `failed`：无法在不拆消息的情况下压缩，例如单条消息过大。
 
+工具结果剪枝事件是 `context_pruning`，在工具结果被剪枝时发送：
+
+- `prune_id`：稳定剪枝 ID，可传给 `read_pruned_tool_result`。
+- `tool_name`：原始工具名。
+- `tool_call_id`：原始工具调用 ID。
+- `original_tokens`：原始工具结果内容估算 token。
+- `retained_tokens`：preview 保留 token。
+- `omitted_tokens`：省略 token。
+- `reason`：剪枝原因，例如单条超阈值或工具结果总量压力。
+
 上下文使用事件是 `context_usage`，每次模型调用前都会发送：
 
 - `estimated_tokens`：前端展示用的内容 token 总和，不包含消息结构/协议开销。
@@ -230,7 +300,7 @@ class ModelContextCache:
 
 消息结构、role 名称等协议开销不进入前端展示分类。后端内部判断是否触发压缩时仍使用更保守的完整消息估算。
 
-前端类型在 `frontend/src/types/chat.ts`；`ChatView.vue` 将最新 `context_usage` 保存到当前 session runtime；`ChatInput.vue` 在发送按钮附近渲染 token 进度条，点击后弹窗展示分类 token 明细。`context_compression` 仍挂到当前 `run_id` 对应的 assistant message，用于显示压缩过程阶段。
+前端类型在 `frontend/src/types/chat.ts`；`ChatView.vue` 将最新 `context_usage` 保存到当前 session runtime；`ChatInput.vue` 在输入框下方渲染 token 进度条，点击后在右侧上下文详情栏展示分类 token 明细。`context_pruning` 也显示在右侧详情栏；`context_compression` 仍挂到当前 `run_id` 对应的 assistant message，用于显示压缩过程阶段。
 
 ## 持久化语义
 
@@ -239,13 +309,14 @@ class ModelContextCache:
 压缩摘要不会追加到 `ctx.messages`，也不会写进 `chat.json`。因此：
 
 - 前端历史接口仍展示真实聊天历史。
-- 重新加载会话不会看到摘要消息。
+- 重新加载会话不会看到摘要消息或剪枝标记。
 - `model_context.json` 损坏或删除时不会破坏会话，只影响下次上下文准备成本。
+- `pruned_tool_results.json` 损坏或删除时不会破坏会话，只会导致旧剪枝 ID 无法恢复，后续上下文准备可重新生成索引。
 
 ## 当前限制
 
 - Token 计数是估算值，不是 tokenizer 精确值。
 - 单条消息超过目标预算时不会被拆分，只会回退到完整上下文并发出 `failed`。
-- V1 尚未实现工具结果级别的占位剪枝；超长 tool result 仍可能撑大上下文。
+- 工具结果恢复工具按字符 offset/limit 返回片段，不提供语义搜索。
 - `model_context.json` 只缓存摘要，不缓存完整模型请求。
 - 摘要质量依赖配置的模型，错误摘要可能影响后续回答；原始 `chat.json` 仍保留，可重新压缩修复。

@@ -10,6 +10,7 @@ from .hooks import BaseHook, HookManager
 from .react_context import ModelRequest, ReactContext
 from .stream import StreamAccumulator
 from .tool_executor import ToolExecutor
+from .tool_pruning import CURRENT_SESSION_DIR
 from .types import Event, Tool
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ class ReactRuntime:
             target_tokens=context_compression.target_tokens,
             summary_target_tokens=context_compression.summary_target_tokens,
             compression_model=context_compression.compression_model,
+            tool_result_pruning=context_compression.tool_result_pruning,
         )
         self.hooks = hooks if isinstance(hooks, HookManager) else HookManager(hooks)
         self.tool_executor = ToolExecutor(self.tools)
@@ -61,6 +63,7 @@ class ReactRuntime:
 
         try:
             await self.hooks.on_run_start(ctx)
+            session_token = CURRENT_SESSION_DIR.set(session_dir)
 
             ctx.messages.append({"role": "user", "content": ctx.user_message})
             await self.hooks.on_user_message(ctx)
@@ -142,6 +145,9 @@ class ReactRuntime:
             logger.exception("React runtime error")
             await self.hooks.on_error(ctx, exc)
             yield Event.error(str(exc))
+        finally:
+            if "session_token" in locals():
+                CURRENT_SESSION_DIR.reset(session_token)
 
     async def _build_messages(
         self,

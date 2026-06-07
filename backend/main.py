@@ -22,6 +22,7 @@ from miniclaw.session_history import (
     SessionListResponse,
 )
 from miniclaw.system_prompt import build_default_system_prompt
+from miniclaw.types import Event
 from tools import get_tools
 
 # 配置日志
@@ -193,6 +194,13 @@ async def get_session_messages(
     if not claw.session_manager.session_exists(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
     return claw.get_messages_page(session_id, before=before, limit=limit)
+
+
+@app.get("/sessions/{session_id}/context-usage", response_model=Event)
+async def get_session_context_usage(session_id: str, claw: Claw = Depends(get_claw)):
+    if not claw.session_manager.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    return claw.get_context_usage(session_id)
 
 
 @app.delete("/sessions/{session_id}")

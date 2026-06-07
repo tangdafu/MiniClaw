@@ -52,6 +52,18 @@ export interface ContextUsageEvent {
   tool_tokens?: number
 }
 
+export interface ContextPruningEvent {
+  stage: string
+  reason?: string
+  prune_id?: string
+  tool_name?: string
+  tool_call_id?: string
+  original_tokens?: number
+  retained_tokens?: number
+  omitted_tokens?: number
+  message_index?: number
+}
+
 export interface SessionSummary {
   session_id: string
   title: string
@@ -68,7 +80,7 @@ export interface MessagePage {
 }
 
 export interface StreamEvent {
-  type: 'text' | 'reasoning' | 'tool_call' | 'tool_result' | 'done' | 'error' | 'session_created' | 'context_compression' | 'context_usage' | 'queued' | 'queue_updated' | 'run_started' | 'cancelled' | 'queue_cleared' | 'session_stopped' | 'cancel_requested'
+  type: 'text' | 'reasoning' | 'tool_call' | 'tool_result' | 'done' | 'error' | 'session_created' | 'context_compression' | 'context_usage' | 'context_pruning' | 'queued' | 'queue_updated' | 'run_started' | 'cancelled' | 'queue_cleared' | 'session_stopped' | 'cancel_requested'
   content?: string
   name?: string
   arguments?: string
@@ -102,4 +114,11 @@ export interface StreamEvent {
   user_tokens?: number
   assistant_tokens?: number
   tool_tokens?: number
+  prune_id?: string
+  tool_name?: string
+  tool_call_id?: string
+  original_tokens?: number
+  retained_tokens?: number
+  omitted_tokens?: number
+  message_index?: number
 }

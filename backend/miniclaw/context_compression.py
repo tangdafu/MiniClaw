@@ -8,6 +8,7 @@ from typing import Any, AsyncIterator
 from openai import AsyncOpenAI
 
 from .token_budget import estimate_messages_tokens, estimate_text_tokens
+from .tool_pruning import ToolResultPruner, ToolResultPruningConfig
 from .types import Event
 
 
@@ -85,6 +86,7 @@ class ContextCompressionService:
         target_tokens: int,
         summary_target_tokens: int,
         compression_model: str | None = None,
+        tool_result_pruning: ToolResultPruningConfig | None = None,
     ):
         self.client = client
         self.model = model
@@ -93,6 +95,7 @@ class ContextCompressionService:
         self.target_tokens = target_tokens
         self.summary_target_tokens = summary_target_tokens
         self.compression_model = compression_model or model
+        self.tool_pruner = ToolResultPruner(tool_result_pruning or ToolResultPruningConfig())
 
     async def prepare(
         self,
@@ -100,11 +103,15 @@ class ContextCompressionService:
         session_dir: Path | None = None,
     ) -> AsyncIterator[Event | PreparedContext]:
         clean_messages = [self._clean_message(message) for message in messages]
+        pruning_result = self.tool_pruner.prune(clean_messages, session_dir, self.trigger_tokens)
+        for event in pruning_result.events:
+            yield event
+        model_base_messages = pruning_result.messages
         system_messages = self._system_messages()
         cache = self._read_cache(session_dir)
 
         if cache and self._cache_hash_matches(cache, clean_messages):
-            cached_context = self._build_context(system_messages, cache.summary_message, clean_messages[cache.covers_until_index:])
+            cached_context = self._build_context(system_messages, cache.summary_message, model_base_messages[cache.covers_until_index:])
             cached_tokens = estimate_messages_tokens(cached_context)
             if cached_tokens <= self.trigger_tokens:
                 yield self._usage_event(
@@ -119,7 +126,7 @@ class ContextCompressionService:
                 yield PreparedContext(cached_context)
                 return
 
-        full_context = self._build_context(system_messages, None, clean_messages)
+        full_context = self._build_context(system_messages, None, model_base_messages)
         full_tokens = estimate_messages_tokens(full_context)
         if not cache and full_tokens <= self.trigger_tokens:
             yield self._usage_event(
@@ -140,10 +147,10 @@ class ContextCompressionService:
             target_tokens=self.target_tokens,
         )
 
-        tail_start = self._select_tail_start(clean_messages, estimate_messages_tokens(system_messages))
-        tail_start = self._repair_tail_start(clean_messages, tail_start)
-        head_messages = clean_messages[:tail_start]
-        tail_messages = clean_messages[tail_start:]
+        tail_start = self._select_tail_start(model_base_messages, estimate_messages_tokens(system_messages))
+        tail_start = self._repair_tail_start(model_base_messages, tail_start)
+        head_messages = model_base_messages[:tail_start]
+        tail_messages = model_base_messages[tail_start:]
         yield Event.context_compression(
             stage="selected_range",
             reason="context_tokens_exceeded",
@@ -161,7 +168,7 @@ class ContextCompressionService:
             return
 
         yield Event.context_compression(stage="summarizing", reason="context_tokens_exceeded")
-        summary = await self._summarize(cache, clean_messages, tail_start)
+        summary = await self._summarize(cache, model_base_messages, tail_start)
         summary_message = {"role": "system", "content": summary}
         compacted_context = self._build_context(system_messages, summary_message, tail_messages)
         after_tokens = estimate_messages_tokens(compacted_context)
@@ -194,6 +201,40 @@ class ContextCompressionService:
             covered_messages=tail_start,
         )
         yield PreparedContext(compacted_context)
+
+    def usage_for_saved_messages(
+        self,
+        messages: list[dict[str, Any]],
+        session_dir: Path | None = None,
+    ) -> Event:
+        clean_messages = [self._clean_message(message) for message in messages]
+        pruning_result = self.tool_pruner.apply_existing_index(clean_messages, session_dir)
+        model_base_messages = pruning_result.messages
+        system_messages = self._system_messages()
+        cache = self._read_cache(session_dir)
+
+        if cache and self._cache_hash_matches(cache, clean_messages):
+            cached_context = self._build_context(system_messages, cache.summary_message, model_base_messages[cache.covers_until_index:])
+            cached_tokens = estimate_messages_tokens(cached_context)
+            if cached_tokens <= self.trigger_tokens:
+                return self._usage_event(
+                    cached_context,
+                    clean_messages,
+                    estimated_tokens=cached_tokens,
+                    compacted=True,
+                    cache_hit=True,
+                    summary_tokens=cache.summary_estimated_tokens,
+                    covered_messages=cache.covers_until_index,
+                )
+
+        full_context = self._build_context(system_messages, None, model_base_messages)
+        return self._usage_event(
+            full_context,
+            clean_messages,
+            estimated_tokens=estimate_messages_tokens(full_context),
+            compacted=False,
+            cache_hit=False,
+        )
 
     def _system_messages(self) -> list[dict[str, str]]:
         return [{"role": "system", "content": self.system_prompt}] if self.system_prompt else []

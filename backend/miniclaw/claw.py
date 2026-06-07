@@ -200,6 +200,14 @@ class Claw:
     ) -> PaginatedMessagesResponse:
         return self.session_manager.get_messages_page(session_id, before=before, limit=limit)
 
+    def get_context_usage(self, session_id: str) -> Event:
+        messages = self.session_manager.load_messages(session_id)
+        session_dir = self.session_manager.get_session_path(session_id)
+        compressor = getattr(getattr(self.agent, "runtime", None), "context_compressor", None)
+        if compressor is None:
+            raise RuntimeError("Context compressor is not available")
+        return compressor.usage_for_saved_messages(messages, session_dir=session_dir)
+
     async def chat(self, session_id: str, user_message: str) -> AsyncIterator[Event]:
         """
         对话入口 — 管理会话生命周期，委托 Agent 处理对话逻辑
