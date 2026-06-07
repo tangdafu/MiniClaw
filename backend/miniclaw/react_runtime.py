@@ -7,10 +7,10 @@ from pathlib import Path
 
 from .context_compression import ContextCompressionService, PreparedContext
 from .hooks import BaseHook, HookManager
-from .react_context import ModelRequest, ReactContext
+from .model_gateway import ChatModelGateway, OpenAIChatModelGateway
+from .react_context import ModelRequest, ReactContext, ToolExecutionContext
 from .stream import StreamAccumulator
 from .tool_executor import ToolExecutor
-from .tool_pruning import CURRENT_SESSION_DIR
 from .types import Event, Tool
 
 logger = logging.getLogger(__name__)
@@ -26,8 +26,10 @@ class ReactRuntime:
             max_iterations: int = 20,
             context_compression=None,
             hooks: list[BaseHook] | HookManager | None = None,
+            model_gateway: ChatModelGateway | None = None,
     ):
         self.client = client
+        self.model_gateway = model_gateway or OpenAIChatModelGateway(client)
         self.model = model
         self.tools = tools or []
         self.system_prompt = system_prompt
@@ -63,7 +65,6 @@ class ReactRuntime:
 
         try:
             await self.hooks.on_run_start(ctx)
-            session_token = CURRENT_SESSION_DIR.set(session_dir)
 
             ctx.messages.append({"role": "user", "content": ctx.user_message})
             await self.hooks.on_user_message(ctx)
@@ -92,7 +93,7 @@ class ReactRuntime:
                 )
                 await self.hooks.before_model_call(ctx, request)
 
-                response = await self.client.chat.completions.create(**request.to_kwargs())
+                response = await self.model_gateway.create_chat_completion(**request.to_kwargs())
 
                 accumulator = StreamAccumulator()
                 async for chunk in response:
@@ -118,7 +119,14 @@ class ReactRuntime:
                 for tool_call in turn.tool_calls:
                     await self.hooks.before_tool_call(ctx, tool_call)
 
-                    execution = await self.tool_executor.execute(tool_call)
+                    execution = await self.tool_executor.execute(
+                        tool_call,
+                        context=ToolExecutionContext(
+                            session_id=session_dir.name if session_dir else None,
+                            session_dir=session_dir,
+                            workspace_root=session_dir.parent.parent if session_dir else None,
+                        ),
+                    )
 
                     yield Event.tool_call(
                         execution.name,
@@ -145,9 +153,6 @@ class ReactRuntime:
             logger.exception("React runtime error")
             await self.hooks.on_error(ctx, exc)
             yield Event.error(str(exc))
-        finally:
-            if "session_token" in locals():
-                CURRENT_SESSION_DIR.reset(session_token)
 
     async def _build_messages(
         self,

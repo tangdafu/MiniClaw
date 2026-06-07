@@ -62,14 +62,20 @@ npm run preview
 ### Backend layers
 
 - `backend/main.py` is the FastAPI entry point. Its lifespan initializes one global `Claw` instance with an `Agent` and the tool list from `tools.get_tools()`. The `/ws/chat` endpoint accepts `{ session_id, message }` and streams serialized `Event` objects back to the client.
-- `backend/miniclaw/claw.py` is the orchestration/session layer. `Claw.chat()` creates a session when needed, loads existing session messages, delegates the conversation loop to `Agent.chat()`, then saves the mutated message history through `SessionManager`.
+- `backend/miniclaw/claw.py` is now a compatibility facade over session APIs, conversation execution, and run coordination. It keeps the public methods used by FastAPI while delegating persisted conversation execution to `ConversationService` and queue/cancel lifecycle to `RunCoordinator`.
+- `backend/miniclaw/conversation.py` owns the conversation application boundary: load session history, call `Agent.chat(..., session_dir=...)`, save resulting history on completion/cancellation, and expose saved context usage.
+- `backend/miniclaw/run_coordinator.py` owns per-session queues, workers, current run tracking, cancellation, queue clearing, stop-session behavior, and queue lifecycle events. It does not know how agent runs mutate messages.
+- `backend/miniclaw/transport.py` projects internal/runtime events and existing `Event` objects into frontend-compatible payload dictionaries with optional `session_id` and `run_id`.
 - `backend/miniclaw/agent.py` is now a facade. It preserves the public `Agent.chat(messages, user_message)` interface, owns `AgentConfig` and the OpenAI-compatible client, and delegates the actual ReAct loop to `ReactRuntime`.
+- `backend/miniclaw/agent_runtime.py` defines the runtime protocol seam for future ReAct/planner/review/routed runtime implementations.
+- `backend/miniclaw/model_gateway.py` isolates chat completion access behind a gateway seam for future model routing or fallback.
 - `backend/miniclaw/react_runtime.py` is the internal ReAct orchestration loop. It appends the user message, builds model requests, calls the streaming Chat Completions API, emits ordered frontend events, appends assistant/tool messages to the same history list, and coordinates hook calls.
-- `backend/miniclaw/context_compression.py` builds model request messages from persisted history. It sends full history below the token trigger, summarizes older history into per-session `model_context.json` above the trigger, keeps the optional system prompt first, repairs leading tool-message boundaries in retained tails, and emits `context_usage` / `context_compression` events.
-- `backend/miniclaw/context_assembler.py` is a compatibility cleanup-only assembler that injects an optional system prompt and strips empty `reasoning_content` fields.
+- `backend/miniclaw/context_pipeline.py` contains focused context-preparation components: message sanitation, no-op memory injection extension point, model context assembly, token usage reporting, tool-result pruning orchestration, history compaction policy, diagnostics container types, and JSON artifact repository helpers.
+- `backend/miniclaw/context_compression.py` is the compatibility facade over the context pipeline components. It preserves `prepare(...)` and `usage_for_saved_messages(...)` while coordinating pruning, cache reuse, full-context decisions, compaction events, summary cache writes, and prepared context output.
 - `backend/miniclaw/react_context.py` defines runtime data structures: `ReactContext`, `ModelRequest`, `ModelTurn`, and `ToolExecution`.
 - `backend/miniclaw/stream.py` contains `StreamAccumulator` and `ToolCallParser`, which reconstruct text, reasoning content, and OpenAI-style streamed tool calls from deltas.
-- `backend/miniclaw/tool_executor.py` owns tool lookup, JSON argument parsing, sync/async handler invocation, and conversion of tool failures into error strings.
+- `backend/miniclaw/tool_executor.py` owns tool lookup, JSON argument parsing, sync/async handler invocation, explicit `ToolExecutionContext` passing for context-aware tools, and conversion of tool failures into error strings.
+- `backend/miniclaw/runtime_events.py` defines internal runtime lifecycle event types for future tracing and diagnostics sinks, while current frontend compatibility remains projected through transport payloads.
 - `backend/miniclaw/hooks.py` defines no-op lifecycle hooks and `HookManager` for future extensions around run start, message building, model calls, assistant turns, tool calls, iteration boundaries, saving, and errors.
 - `backend/miniclaw/types.py` defines the Pydantic `Tool`, `Event`, and message-related models used by both orchestration and transport.
 - `backend/tools.py` is now a compatibility entry point for built-in tools. It preserves `get_tools()`, `SkillManager`, and `execute_command` exports while delegating to `backend/miniclaw/tools/`.

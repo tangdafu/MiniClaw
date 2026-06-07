@@ -1,17 +1,14 @@
 import hashlib
 import json
 import os
-from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .react_context import ToolExecutionContext
 from .token_budget import estimate_messages_tokens, estimate_text_tokens
 from .types import Event, Tool
-
-
-CURRENT_SESSION_DIR: ContextVar[Path | None] = ContextVar("miniclaw_current_session_dir", default=None)
 
 
 @dataclass(frozen=True)
@@ -334,8 +331,13 @@ class ToolResultPruner:
         return "ptr_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 
 
-def read_pruned_tool_result(prune_id: str, offset: int = 0, limit: int = 8_000) -> str:
-    session_dir = CURRENT_SESSION_DIR.get()
+def read_pruned_tool_result(
+    prune_id: str,
+    offset: int = 0,
+    limit: int = 8_000,
+    context: ToolExecutionContext | None = None,
+) -> str:
+    session_dir = context.session_dir if context else None
     max_chars = _positive_int_env("MINICLAW_PRUNED_TOOL_RESULT_READ_MAX_CHARS", 20_000)
     return PrunedToolResultRepository(session_dir).read_result(prune_id, offset=offset, limit=limit, max_chars=max_chars)
 

@@ -1,7 +1,7 @@
 """MiniClaw Agent - 核心类型定义"""
 
-from typing import Any, Callable, Literal
-from pydantic import BaseModel, Field
+from typing import Any, Callable, ClassVar, Literal
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 
 class Message(BaseModel):
@@ -31,6 +31,10 @@ class Tool(BaseModel):
     description: str
     parameters: dict  # JSON Schema
     handler: Callable[..., Any]  # 同步或异步函数
+    category: str = "general"
+    risk_level: Literal["low", "medium", "high"] = "low"
+    visibility: Literal["model", "internal"] = "model"
+    execution_policy: str = "auto"
 
     def to_openai_schema(self) -> dict:
         """转换为 OpenAI function schema"""
@@ -46,85 +50,112 @@ class Tool(BaseModel):
 
 class Event(BaseModel):
     """Agent 流式事件"""
+
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal["text", "reasoning", "tool_call", "tool_result", "done", "error", "session_created", "context_compression", "context_usage", "context_pruning"]
-    content: str = ""
-    name: str = ""           # 工具名称
-    arguments: str = ""      # 工具参数
-    result: str = ""         # 工具结果
-    error_msg: str = ""      # 错误信息（字段名避免和静态方法冲突）
-    session_id: str = ""     # 会话 ID（用于 session_created 事件）
-    stage: str = ""
-    reason: str = ""
-    detail: str = ""
-    estimated_tokens: int | None = None
-    trigger_tokens: int | None = None
-    target_tokens: int | None = None
-    head_messages: int | None = None
-    tail_messages: int | None = None
-    covered_messages: int | None = None
-    summary_tokens: int | None = None
-    estimated_tokens_after: int | None = None
-    model_messages: int | None = None
-    history_messages: int | None = None
-    compacted: bool | None = None
-    cache_hit: bool | None = None
-    system_tokens: int | None = None
-    summary_tokens_breakdown: int | None = None
-    user_tokens: int | None = None
-    assistant_tokens: int | None = None
-    tool_tokens: int | None = None
-    prune_id: str = ""
-    tool_name: str = ""
-    tool_call_id: str = ""
-    original_tokens: int | None = None
-    retained_tokens: int | None = None
-    omitted_tokens: int | None = None
-    message_index: int | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
+
+    _default_values: ClassVar[dict[str, Any]] = {
+        "content": "",
+        "name": "",
+        "arguments": "",
+        "result": "",
+        "error_msg": "",
+        "session_id": "",
+        "stage": "",
+        "reason": "",
+        "detail": "",
+        "prune_id": "",
+        "tool_name": "",
+        "tool_call_id": "",
+        "estimated_tokens": None,
+        "trigger_tokens": None,
+        "target_tokens": None,
+        "head_messages": None,
+        "tail_messages": None,
+        "covered_messages": None,
+        "summary_tokens": None,
+        "estimated_tokens_after": None,
+        "model_messages": None,
+        "history_messages": None,
+        "compacted": None,
+        "cache_hit": None,
+        "system_tokens": None,
+        "summary_tokens_breakdown": None,
+        "user_tokens": None,
+        "assistant_tokens": None,
+        "tool_tokens": None,
+        "original_tokens": None,
+        "retained_tokens": None,
+        "omitted_tokens": None,
+        "message_index": None,
+    }
+
+    @classmethod
+    def create(cls, event_type: str, **data: Any) -> "Event":
+        return cls(type=event_type, data={key: value for key, value in data.items() if value is not None})
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self.data:
+            return self.data[name]
+        if name in self._default_values:
+            return self._default_values[name]
+        raise AttributeError(name)
 
     @staticmethod
     def text(content: str) -> "Event":
-        return Event(type="text", content=content)
+        return Event.create("text", content=content)
 
     @staticmethod
     def reasoning(content: str) -> "Event":
-        return Event(type="reasoning", content=content)
+        return Event.create("reasoning", content=content)
 
     @staticmethod
     def tool_call(name: str, arguments: str) -> "Event":
-        return Event(type="tool_call", name=name, arguments=arguments)
+        return Event.create("tool_call", name=name, arguments=arguments)
 
     @staticmethod
     def tool_result(name: str, result: str) -> "Event":
-        return Event(type="tool_result", name=name, result=result)
+        return Event.create("tool_result", name=name, result=result)
 
     @staticmethod
     def done() -> "Event":
-        return Event(type="done")
+        return Event.create("done")
 
     @staticmethod
     def error(message: str) -> "Event":
-        return Event(type="error", error_msg=message)
+        return Event.create("error", error_msg=message)
 
     @staticmethod
     def session_created(session_id: str) -> "Event":
-        return Event(type="session_created", session_id=session_id)
+        return Event.create("session_created", session_id=session_id)
 
     @staticmethod
     def context_compression(**kwargs) -> "Event":
-        return Event(type="context_compression", **kwargs)
+        return Event.create("context_compression", **kwargs)
 
     @staticmethod
     def context_usage(**kwargs) -> "Event":
-        return Event(type="context_usage", **kwargs)
+        return Event.create("context_usage", **kwargs)
 
     @staticmethod
     def context_pruning(**kwargs) -> "Event":
-        return Event(type="context_pruning", **kwargs)
+        return Event.create("context_pruning", **kwargs)
 
     def model_dump(self, **kwargs) -> dict:
         """自定义序列化，将 error_msg 映射为 error 键"""
-        d = super().model_dump(**kwargs)
-        # 对外暴露时，将 error_msg 映射为 error
-        if "error_msg" in d:
-            d["error"] = d.pop("error_msg")
-        return d
+        exclude_none = bool(kwargs.get("exclude_none", False))
+        return self._flat_payload(exclude_none=exclude_none)
+
+    @model_serializer(mode="plain")
+    def serialize(self) -> dict[str, Any]:
+        return self._flat_payload(exclude_none=False)
+
+    def _flat_payload(self, exclude_none: bool = False) -> dict[str, Any]:
+        payload = {"type": self.type, **self.data}
+        if "error_msg" in payload:
+            payload["error"] = payload.pop("error_msg")
+        if exclude_none:
+            payload = {key: value for key, value in payload.items() if value is not None}
+        return payload

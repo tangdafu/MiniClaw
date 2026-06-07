@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .types import Tool
@@ -51,3 +52,16 @@ class ToolExecution:
     arguments: dict[str, Any]
     result: str
     error: str | None = None
+    session_id: str | None = None
+    run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ToolExecutionContext:
+    session_id: str | None = None
+    run_id: str | None = None
+    session_dir: Path | None = None
+    workspace_root: Path | None = None
+    cancelled: bool = False
+    permissions: dict[str, Any] = field(default_factory=dict)
+    trace: dict[str, Any] = field(default_factory=dict)
