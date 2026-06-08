@@ -41,6 +41,18 @@ class NoOpMemoryInjectionStep:
         return ContextPipelineResult(messages=[dict(message) for message in messages])
 
 
+class MemoryPromptInjectionStep:
+    def __init__(self, memory_service):
+        self.memory_service = memory_service
+
+    def apply(self, messages: list[dict[str, Any]]) -> ContextPipelineResult:
+        memory_content = self.memory_service.stable_prompt_content()
+        clean_messages = [dict(message) for message in messages]
+        if not memory_content.strip():
+            return ContextPipelineResult(messages=clean_messages)
+        return ContextPipelineResult(messages=[{"role": "system", "content": memory_content}, *clean_messages])
+
+
 class ModelContextBuilder:
     def __init__(self, system_prompt: str | None, sanitizer: MessageSanitizerStep):
         self.system_prompt = system_prompt
@@ -110,6 +122,8 @@ class ContextUsageReporter:
                 breakdown["system_tokens"] += content_tokens
             elif role == "system" and str(message.get("content", "")).startswith("[Context Summary]"):
                 breakdown["summary_tokens_breakdown"] += content_tokens
+            elif role == "system":
+                breakdown["system_tokens"] += content_tokens
             elif role == "user":
                 breakdown["user_tokens"] += content_tokens
             elif role == "assistant":

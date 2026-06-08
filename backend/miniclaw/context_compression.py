@@ -10,11 +10,12 @@ from .context_pipeline import (
     ContextUsageReporter,
     HistoryCompactionStep,
     JsonArtifactRepository,
+    MemoryPromptInjectionStep,
     MessageSanitizerStep,
     ModelContextBuilder,
-    NoOpMemoryInjectionStep,
     ToolResultPruningStep,
 )
+from .memory import MemoryConfig, MemoryService
 from .model_gateway import ChatModelGateway, OpenAIChatModelGateway
 from .token_budget import estimate_messages_tokens
 from .tool_pruning import ToolResultPruner, ToolResultPruningConfig
@@ -97,6 +98,7 @@ class ContextCompressionService:
         compression_model: str | None = None,
         tool_result_pruning: ToolResultPruningConfig | None = None,
         model_gateway: ChatModelGateway | None = None,
+        memory_service: MemoryService | None = None,
     ):
         self.client = client
         self.model_gateway = model_gateway or OpenAIChatModelGateway(client)
@@ -108,7 +110,7 @@ class ContextCompressionService:
         self.compression_model = compression_model or model
         self.tool_pruner = ToolResultPruner(tool_result_pruning or ToolResultPruningConfig())
         self.message_sanitizer = MessageSanitizerStep()
-        self.memory_injector = NoOpMemoryInjectionStep()
+        self.memory_injector = MemoryPromptInjectionStep(memory_service or MemoryService(MemoryConfig.from_env()))
         self.tool_pruning_step = ToolResultPruningStep(self.tool_pruner)
         self.cache_repository = JsonArtifactRepository("model_context.json", ModelContextCache.from_dict)
         self.context_builder = ModelContextBuilder(self.system_prompt, self.message_sanitizer)

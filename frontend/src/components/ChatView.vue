@@ -96,17 +96,22 @@
         </div>
       </div>
       <section v-if="activePruningEvents.length" class="pruning-section">
-        <h4>工具结果剪枝</h4>
-        <div v-for="event in activePruningEvents" :key="event.prune_id || `${event.tool_call_id}-${event.message_index}`" class="pruning-card">
-          <div>
-            <strong>{{ event.tool_name || 'tool' }}</strong>
-            <code>{{ event.prune_id }}</code>
+        <div class="pruning-heading">
+          <h4>工具结果剪枝</h4>
+          <span>{{ activePruningEvents.length }} 条</span>
+        </div>
+        <div class="pruning-list">
+          <div v-for="event in activePruningEvents" :key="pruningEventKey(event)" class="pruning-card">
+            <div>
+              <strong>{{ event.tool_name || 'tool' }}</strong>
+              <code>{{ event.prune_id }}</code>
+            </div>
+            <dl>
+              <span>原始 {{ formatTokens(event.original_tokens) }}</span>
+              <span>保留 {{ formatTokens(event.retained_tokens) }}</span>
+              <span>省略 {{ formatTokens(event.omitted_tokens) }}</span>
+            </dl>
           </div>
-          <dl>
-            <span>原始 {{ formatTokens(event.original_tokens) }}</span>
-            <span>保留 {{ formatTokens(event.retained_tokens) }}</span>
-            <span>省略 {{ formatTokens(event.omitted_tokens) }}</span>
-          </dl>
         </div>
       </section>
       <p class="usage-note">
@@ -401,8 +406,13 @@ async function loadContextUsage(id: string) {
   try {
     const usage = await fetchJson<ContextUsageEvent>(`/sessions/${encodeURIComponent(id)}/context-usage`)
     state.contextUsage = usage
+    state.pruningEvents = []
+    for (const event of usage.pruning_records ?? []) {
+      upsertPruningEvent(state, event)
+    }
   } catch {
     state.contextUsage = undefined
+    state.pruningEvents = []
   }
 }
 
@@ -528,7 +538,7 @@ function handleEvent(event: StreamEvent) {
       break
 
     case 'context_pruning':
-      state.pruningEvents.push({
+      upsertPruningEvent(state, {
         stage: event.stage ?? '',
         reason: event.reason,
         prune_id: event.prune_id,
@@ -651,6 +661,20 @@ function ensureAssistantForRun(state: SessionRuntimeState, runId?: string, statu
   }
   message.status = status
   return message
+}
+
+function upsertPruningEvent(state: SessionRuntimeState, event: ContextPruningEvent) {
+  const key = pruningEventKey(event)
+  const existingIndex = state.pruningEvents.findIndex((item) => pruningEventKey(item) === key)
+  if (existingIndex >= 0) {
+    state.pruningEvents.splice(existingIndex, 1, event)
+    return
+  }
+  state.pruningEvents.push(event)
+}
+
+function pruningEventKey(event: ContextPruningEvent) {
+  return event.prune_id || `${event.tool_call_id || 'tool'}-${event.message_index ?? 'unknown'}`
 }
 
 function markQueuedMessagesCancelled(state: SessionRuntimeState, content: string) {
@@ -952,10 +976,32 @@ onUnmounted(() => {
   gap: 8px;
 }
 
-.pruning-section h4 {
+.pruning-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.pruning-heading h4 {
   margin: 0;
   color: var(--text-strong);
   font-size: 14px;
+}
+
+.pruning-heading span {
+  color: #c2410c;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.pruning-list {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
 }
 
 .pruning-card {

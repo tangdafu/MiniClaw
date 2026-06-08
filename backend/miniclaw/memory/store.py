@@ -1,16 +1,15 @@
-import hashlib
-from dataclasses import dataclass, field
-import shutil
-import uuid
+import os
+import re
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from .models import MemoryRecord
+from .models import MemoryFileEntry, MemoryRecord
+from .text import hash_text
 
 
-INVALID_PATH_CHARS = set('<>:"/\\|?*')
-MEMORY_TYPES = {"profile", "memory", "daily"}
-TYPE_ALIASES = {
+DATE_FILE_RE = re.compile(r"^memory/\d{4}-\d{2}-\d{2}\.md$")
+TOPIC_FILE_RE = re.compile(r"^memory/topics/[^/\\]+\.md$")
+LEGACY_TYPE_ALIASES = {
     "preference": "profile",
     "preferences": "profile",
     "note": "memory",
@@ -20,245 +19,184 @@ TYPE_ALIASES = {
 }
 
 
-@dataclass(frozen=True)
-class MarkdownMemoryDocument:
-    frontmatter: dict[str, object] = field(default_factory=dict)
-    body: str = ""
-
-
 class MarkdownMemoryStore:
     def __init__(self, memory_dir: Path):
         self.memory_dir = Path(memory_dir)
         self.memory_dir.mkdir(parents=True, exist_ok=True)
-        (self.memory_dir / ".trash").mkdir(parents=True, exist_ok=True)
+        self.memory_root.mkdir(parents=True, exist_ok=True)
+        self.topics_dir.mkdir(parents=True, exist_ok=True)
 
-    def create(
-        self,
-        title: str,
-        content: str,
-        memory_type: str = "memory",
-        topic: str | None = None,
-        memory_date: str | None = None,
-        tags: list[str] | None = None,
-        source: str = "user_explicit",
-        confidence: float = 0.9,
-    ) -> tuple[MemoryRecord, str]:
-        safe_type = self.normalize_memory_type(memory_type)
-        relative_path = self.path_for(safe_type, title=title, topic=topic, memory_date=memory_date)
-        memory_id = self.id_for(safe_type, relative_path)
-        now = datetime.now(timezone.utc).isoformat()
-        existing_body = ""
-        created_at = now
-        target = self.resolve_relative(relative_path)
-        if target.exists():
-            existing_document = self.parse_markdown(target.read_text(encoding="utf-8"))
-            existing_body = existing_document.body
-            created_at = str(existing_document.frontmatter.get("created_at") or now)
-        body = self.merge_body(existing_body, content, safe_type)
+    @property
+    def memory_root(self) -> Path:
+        return self.memory_dir / "memory"
 
-        record = MemoryRecord(
-            id=memory_id,
-            path=relative_path,
-            type=safe_type,
-            title=title.strip() or "Untitled memory",
-            tags=tags or [],
-            source=source,
-            confidence=float(confidence),
-            created_at=created_at,
-            updated_at=now,
-            content_hash=self.hash_text(body),
-        )
+    @property
+    def topics_dir(self) -> Path:
+        return self.memory_root / "topics"
 
-        target.parent.mkdir(parents=True, exist_ok=True)
-        markdown = self.render_markdown(record, body)
-        target.write_text(markdown, encoding="utf-8")
-        return record, markdown
+    def validate_memory_path(self, path: str) -> str:
+        normalized = (path or "").replace("\\", "/").strip()
+        if not normalized:
+            raise ValueError("Memory path is required")
+        if ".." in normalized.split("/") or normalized.startswith("/"):
+            raise ValueError("Invalid memory path: traversal and absolute paths are not allowed")
+        if len(normalized) >= 2 and normalized[1] == ":":
+            raise ValueError("Invalid memory path: absolute paths are not allowed")
+        if not normalized.endswith(".md"):
+            raise ValueError("Memory path must be a Markdown file ending in .md")
+        if normalized in {"memory/MEMORY.md", "memory/USER.md"}:
+            return normalized
+        if DATE_FILE_RE.match(normalized) or TOPIC_FILE_RE.match(normalized):
+            return normalized
+        raise ValueError("Memory path must be memory/MEMORY.md, memory/USER.md, memory/YYYY-MM-DD.md, or memory/topics/<topic>.md")
 
-    def read_by_path(self, relative_path: str) -> str:
-        target = self.resolve_relative(relative_path)
-        if not target.exists() or not target.is_file():
-            raise FileNotFoundError(relative_path)
-        return target.read_text(encoding="utf-8")
-
-    def iter_memory_files(self) -> list[Path]:
-        if not self.memory_dir.exists():
-            return []
-        return sorted(
-            path for path in self.memory_dir.rglob("*.md")
-            if path.is_file() and ".trash" not in path.relative_to(self.memory_dir).parts
-        )
-
-    def forget(self, relative_path: str, memory_id: str) -> str:
-        source = self.resolve_relative(relative_path)
-        trash_relative = f".trash/{memory_id}.md"
-        target = self.resolve_relative(trash_relative)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if source.exists() and source.is_file():
-            if target.exists():
-                target.unlink()
-            shutil.move(str(source), str(target))
-        return trash_relative
-
-    def resolve_relative(self, relative_path: str) -> Path:
-        target = (self.memory_dir / relative_path).resolve()
+    def resolve(self, path: str) -> Path:
+        normalized = self.validate_memory_path(path)
+        target = (self.memory_dir / normalized).resolve()
         root = self.memory_dir.resolve()
         if root != target and root not in target.parents:
             raise ValueError("Memory path escapes memory directory")
         return target
 
-    def render_markdown(self, record: MemoryRecord, content: str) -> str:
-        tag_lines = "\n".join(f"  - {tag}" for tag in record.tags) or "  []"
-        return (
-            "---\n"
-            f"id: {record.id}\n"
-            f"type: {record.type}\n"
-            f"title: {record.title}\n"
-            "tags:\n"
-            f"{tag_lines}\n"
-            f"source: {record.source}\n"
-            f"confidence: {record.confidence}\n"
-            f"created_at: {record.created_at}\n"
-            f"updated_at: {record.updated_at}\n"
-            f"content_hash: {record.content_hash}\n"
-            "---\n\n"
-            f"{content.strip()}\n"
+    def read_file(self, path: str, from_line: int | None = None, lines: int | None = None) -> dict[str, object]:
+        normalized = self.validate_memory_path(path)
+        target = self.resolve(normalized)
+        if not target.exists() or not target.is_file():
+            raise FileNotFoundError(normalized)
+        all_lines = target.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        total_lines = len(all_lines)
+        start = max(0, int(from_line or 1) - 1)
+        end = total_lines if lines is None else min(total_lines, start + max(0, int(lines)))
+        selected = all_lines[start:end]
+        return {
+            "path": normalized,
+            "text": "".join(selected),
+            "totalLines": total_lines,
+            "fromLine": start + 1 if total_lines else 1,
+            "toLine": start + len(selected),
+            "truncated": end < total_lines,
+        }
+
+    def write_file(self, path: str, content: str, append: bool = False) -> dict[str, object]:
+        normalized = self.validate_memory_path(path)
+        target = self.resolve(normalized)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        existed = target.exists()
+        mode = "a" if append else "w"
+        with target.open(mode, encoding="utf-8") as handle:
+            handle.write(str(content))
+            if content and not str(content).endswith("\n"):
+                handle.write("\n")
+        self.update_memory_index_for_path(normalized)
+        return {"success": True, "path": normalized, "appended": append, "fileExisted": existed}
+
+    def edit_file(self, path: str, old_text: str, new_text: str) -> dict[str, object]:
+        normalized = self.validate_memory_path(path)
+        target = self.resolve(normalized)
+        if not target.exists() or not target.is_file():
+            raise FileNotFoundError(normalized)
+        content = target.read_text(encoding="utf-8", errors="replace")
+        if old_text not in content:
+            return {"success": False, "path": normalized, "error": "oldText not found. Use memory_get to inspect the exact file content first."}
+        occurrences = content.count(old_text)
+        if occurrences > 1:
+            return {"success": False, "path": normalized, "error": f"oldText appears {occurrences} times. Use a more specific replacement target."}
+        target.write_text(content.replace(old_text, new_text, 1), encoding="utf-8")
+        self.update_memory_index_for_path(normalized)
+        return {"success": True, "path": normalized, "replaced": old_text, "with": new_text}
+
+    def iter_memory_files(self) -> list[Path]:
+        if not self.memory_root.exists():
+            return []
+        return sorted(path for path in self.memory_root.rglob("*.md") if path.is_file())
+
+    def build_file_entry(self, path: Path) -> MemoryFileEntry:
+        stat = path.stat()
+        relative = path.relative_to(self.memory_dir).as_posix()
+        content = path.read_text(encoding="utf-8", errors="replace")
+        return MemoryFileEntry(
+            path=relative,
+            absolute_path=str(path),
+            source="memory",
+            content_hash=hash_text(content),
+            mtime_ms=int(stat.st_mtime * 1000),
+            size=stat.st_size,
         )
 
-    def record_from_markdown(self, relative_path: str, markdown: str) -> MemoryRecord:
-        document = self.parse_markdown(markdown)
-        memory_type = self.normalize_memory_type(str(document.frontmatter.get("type") or "memory"))
-        memory_id = str(document.frontmatter.get("id") or self.id_for(memory_type, relative_path))
-        title = str(document.frontmatter.get("title") or Path(relative_path).stem or "Untitled memory")
-        tags = document.frontmatter.get("tags")
-        if not isinstance(tags, list):
-            tags = []
-        content_hash = str(document.frontmatter.get("content_hash") or self.hash_text(document.body))
+    def update_memory_index_for_path(self, path: str) -> None:
+        normalized = self.validate_memory_path(path)
+        if not normalized.startswith("memory/topics/"):
+            return
+        index_path = self.resolve("memory/MEMORY.md")
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        topic_name = Path(normalized).stem
+        entry = f"- [{topic_name}]({normalized.removeprefix('memory/')})"
+        existing = index_path.read_text(encoding="utf-8", errors="replace") if index_path.exists() else "# Memory Index\n\n"
+        if f"]({normalized.removeprefix('memory/')})" in existing:
+            return
+        if not existing.endswith("\n"):
+            existing += "\n"
+        index_path.write_text(f"{existing}{entry}\n", encoding="utf-8")
+
+    def path_for_legacy(self, title: str, memory_type: str | None, topic: str | None, memory_date: str | None) -> str:
+        normalized_type = self.safe_name(memory_type or "memory") or "memory"
+        normalized_type = LEGACY_TYPE_ALIASES.get(normalized_type, normalized_type)
+        if normalized_type == "profile":
+            return "memory/USER.md"
+        if normalized_type == "daily":
+            return f"memory/{self.safe_name(memory_date or date.today().isoformat())}.md"
+        return f"memory/topics/{self.safe_name(topic or title) or 'general'}.md"
+
+    def legacy_record(self, path: str, title: str, memory_type: str | None = None) -> MemoryRecord:
+        normalized = self.validate_memory_path(path)
+        target = self.resolve(normalized)
+        content = target.read_text(encoding="utf-8", errors="replace") if target.exists() else ""
+        safe_type = LEGACY_TYPE_ALIASES.get(self.safe_name(memory_type or "memory"), self.safe_name(memory_type or "memory"))
+        if normalized == "memory/USER.md":
+            safe_type = "profile"
+        elif DATE_FILE_RE.match(normalized):
+            safe_type = "daily"
+        else:
+            safe_type = "memory"
         now = datetime.now(timezone.utc).isoformat()
         return MemoryRecord(
-            id=memory_id,
-            path=relative_path,
-            type=memory_type,
-            title=title,
-            tags=[str(tag) for tag in tags],
-            source=str(document.frontmatter.get("source") or "user_explicit"),
-            confidence=self.parse_float(document.frontmatter.get("confidence"), 0.9),
-            created_at=str(document.frontmatter.get("created_at") or now),
-            updated_at=str(document.frontmatter.get("updated_at") or now),
-            content_hash=content_hash,
+            id=self.memory_id_for_path(normalized),
+            path=normalized,
+            type=safe_type,
+            title=title.strip() or Path(normalized).stem,
+            created_at=now,
+            updated_at=now,
+            content_hash=hash_text(content),
         )
 
-    def generate_memory_id(self) -> str:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
-        return f"mem_{stamp}_{uuid.uuid4().hex[:8]}"
-
-    def id_for(self, memory_type: str, relative_path: str) -> str:
-        if memory_type == "profile":
+    def memory_id_for_path(self, path: str) -> str:
+        normalized = self.validate_memory_path(path)
+        if normalized == "memory/USER.md":
             return "profile_user"
-        if memory_type == "daily":
-            return f"daily_{Path(relative_path).stem.replace('-', '_')}"
-        if Path(relative_path).stem.startswith("mem_"):
-            return Path(relative_path).stem
-        return f"memory_{Path(relative_path).stem}"
-
-    def path_for(self, memory_type: str, title: str, topic: str | None, memory_date: str | None) -> str:
-        if memory_type == "profile":
-            return "profile/user.md"
-        if memory_type == "daily":
-            day = memory_date or date.today().isoformat()
-            return f"daily/{self.safe_name(day)}.md"
-        safe_topic = self.safe_name(topic or title)
-        if not safe_topic:
-            return f"memory/{self.generate_memory_id()}.md"
-        return f"memory/{safe_topic}.md"
-
-    def normalize_memory_type(self, memory_type: str | None) -> str:
-        normalized = self.safe_name(memory_type or "memory") or "memory"
-        normalized = TYPE_ALIASES.get(normalized, normalized)
-        if normalized not in MEMORY_TYPES:
-            return "memory"
-        return normalized
+        if normalized == "memory/MEMORY.md":
+            return "memory_index"
+        if DATE_FILE_RE.match(normalized):
+            return f"daily_{Path(normalized).stem.replace('-', '_')}"
+        return f"memory_{Path(normalized).stem}"
 
     def safe_name(self, value: str) -> str:
         cleaned = []
-        previous_was_separator = False
+        previous = False
         for char in (value or "").strip():
-            if char.isspace() or char in INVALID_PATH_CHARS:
-                if not previous_was_separator:
+            if char.isspace() or char in '<>:"/\\|?*':
+                if not previous:
                     cleaned.append("_")
-                    previous_was_separator = True
+                    previous = True
                 continue
             if ord(char) < 32:
                 continue
             cleaned.append(char)
-            previous_was_separator = False
+            previous = False
         return "".join(cleaned).strip("._-").lower()
 
-    def merge_body(self, existing_body: str, new_content: str, memory_type: str) -> str:
-        new_body = new_content.strip()
-        if not existing_body.strip():
-            return new_body
-        if not new_body:
-            return existing_body.strip()
-        if new_body in existing_body:
-            return existing_body.strip()
-        timestamp = datetime.now(timezone.utc).isoformat()
-        heading = {
-            "profile": "Profile Update",
-            "memory": "Topic Update",
-            "daily": "Daily Entry",
-        }.get(memory_type, "Update")
-        return f"{existing_body.strip()}\n\n## {heading} {timestamp}\n\n{new_body}"
-
-    def body_from_markdown(self, markdown: str) -> str:
-        return self.parse_markdown(markdown).body
-
-    def frontmatter_value(self, markdown: str, key: str) -> str | None:
-        value = self.parse_markdown(markdown).frontmatter.get(key)
-        return str(value) if value is not None else None
-
-    def parse_markdown(self, markdown: str) -> MarkdownMemoryDocument:
-        if not markdown.startswith("---"):
-            return MarkdownMemoryDocument(body=markdown.strip())
-        parts = markdown.split("---", 2)
-        if len(parts) != 3:
-            return MarkdownMemoryDocument(body=markdown.strip())
-
-        frontmatter: dict[str, object] = {}
-        current_list_key: str | None = None
-        for raw_line in parts[1].splitlines():
-            line = raw_line.rstrip()
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if current_list_key and stripped.startswith("-"):
-                value = stripped[1:].strip()
-                if value:
-                    cast_list = frontmatter.setdefault(current_list_key, [])
-                    if isinstance(cast_list, list):
-                        cast_list.append(value)
-                continue
-            current_list_key = None
-            if ":" not in line:
-                continue
-            key, raw_value = line.split(":", 1)
-            key = key.strip()
-            value = raw_value.strip()
-            if not key:
-                continue
-            if value == "":
-                frontmatter[key] = []
-                current_list_key = key
-            elif value == "[]":
-                frontmatter[key] = []
-            else:
-                frontmatter[key] = value
-        return MarkdownMemoryDocument(frontmatter=frontmatter, body=parts[2].strip())
-
-    def parse_float(self, value: object, default: float) -> float:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return default
-
-    def hash_text(self, text: str) -> str:
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    def forget_path(self, path: str) -> bool:
+        target = self.resolve(path)
+        if target.exists() and target.is_file():
+            target.unlink()
+            return True
+        return False

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import AsyncIterator, Protocol
 
 from .types import Event
+from .tool_pruning import restored_pruning_records
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,13 @@ class ConversationService:
         compressor = getattr(getattr(self.agent, "runtime", None), "context_compressor", None)
         if compressor is None:
             raise RuntimeError("Context compressor is not available")
-        return compressor.usage_for_saved_messages(messages, session_dir=session_dir)
+        event = compressor.usage_for_saved_messages(messages, session_dir=session_dir)
+        keep_tokens = getattr(getattr(compressor, "tool_pruner", None), "config", None)
+        event.data["pruning_records"] = restored_pruning_records(
+            session_dir,
+            keep_tokens=getattr(keep_tokens, "keep_tokens", 2_000),
+        )
+        return event
 
     def session_dir(self, session_id: str) -> Path:
         return self.session_manager.get_session_path(session_id)

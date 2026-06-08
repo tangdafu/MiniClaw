@@ -3,6 +3,21 @@ from .service import MemoryService
 
 
 def get_memory_tools(service: MemoryService) -> list[Tool]:
+    async def memory_search(query: str, max_results: int | None = None, min_score: float | None = None, mode: str = "hybrid") -> str:
+        return await service.memory_search(query=query, max_results=max_results, min_score=min_score, mode=mode)
+
+    def memory_get(path: str, from_line: int | None = None, lines: int | None = None) -> str:
+        return service.memory_get(path=path, from_line=from_line, lines=lines)
+
+    def memory_write(path: str, content: str, append: bool = False) -> str:
+        return service.memory_write(path=path, content=content, append=append)
+
+    def memory_edit(path: str, oldText: str, newText: str) -> str:
+        return service.memory_edit(path=path, old_text=oldText, new_text=newText)
+
+    async def memory_reindex() -> str:
+        return await service.memory_reindex()
+
     async def remember(
         title: str,
         content: str,
@@ -13,26 +28,12 @@ def get_memory_tools(service: MemoryService) -> list[Tool]:
         source: str = "user_explicit",
         confidence: float = 0.9,
     ) -> str:
-        record = await service.remember(
-            title=title,
-            content=content,
-            memory_type=memory_type,
-            topic=topic,
-            memory_date=memory_date,
-            tags=tags or [],
-            source=source,
-            confidence=confidence,
-        )
+        record = await service.remember(title, content, memory_type, topic, memory_date, tags or [], source, confidence)
         return service.format_record(record)
 
-    async def search_memory(
-        query: str,
-        mode: str = "hybrid",
-        memory_type: str | None = None,
-        limit: int = 5,
-    ) -> str:
-        results, warning = await service.search(query=query, mode=mode, memory_type=memory_type, limit=limit)
-        return service.format_search_results(results, warning=warning)
+    async def search_memory(query: str, mode: str = "hybrid", memory_type: str | None = None, limit: int = 5) -> str:
+        del memory_type
+        return await service.memory_search(query=query, max_results=limit, mode=mode)
 
     def read_memory(memory_id: str) -> str:
         return service.read_memory(memory_id)
@@ -41,23 +42,86 @@ def get_memory_tools(service: MemoryService) -> list[Tool]:
         return service.forget_memory(memory_id)
 
     async def reindex_memories() -> str:
-        return service.format_reindex_result(await service.reindex_all_memories())
+        return await service.memory_reindex()
 
     return [
         Tool(
-            name="remember",
-            description="保存长期记忆。memory_type 支持 profile、memory、daily：profile 固定写入 profile/user.md，memory 按 topic 写入 memory/<topic>.md，daily 按日期写入 daily/YYYY-MM-DD.md。profile 适合用户稳定偏好和身份信息，memory 适合主题级长期事实，daily 适合当天摘要。重复 content 不会再次追加。",
+            name="memory_search",
+            description="Search local long-term memory Markdown files before answering questions about previous decisions, user preferences, prior work, dates, people, or todos. Results include path and line citations; call memory_get with the returned path/lines before editing or when more context is needed.",
             parameters={
                 "type": "object",
                 "properties": {
-                    "title": {"type": "string", "description": "记忆标题"},
-                    "content": {"type": "string", "description": "记忆正文"},
-                    "memory_type": {"type": "string", "description": "记忆范围：profile、memory 或 daily，默认 memory。旧的 preference 会归入 profile，project/note 会归入 memory。"},
-                    "topic": {"type": "string", "description": "memory 类型的主题文件名，如 frontend_design、backend_architecture、前端设计"},
-                    "memory_date": {"type": "string", "description": "daily 类型日期，格式 YYYY-MM-DD，默认今天"},
-                    "tags": {"type": "array", "items": {"type": "string"}, "description": "标签列表"},
-                    "source": {"type": "string", "description": "来源，默认 user_explicit"},
-                    "confidence": {"type": "number", "description": "置信度，默认 0.9"},
+                    "query": {"type": "string", "description": "Search query describing the memory to retrieve."},
+                    "max_results": {"type": "integer", "description": "Maximum results, 1-20. Default 5."},
+                    "min_score": {"type": "number", "description": "Optional minimum relevance score."},
+                    "mode": {"type": "string", "description": "fts, vector, or hybrid. Default hybrid."},
+                },
+                "required": ["query"],
+            },
+            handler=memory_search,
+        ),
+        Tool(
+            name="memory_get",
+            description="Read a safe memory Markdown file, optionally by line range. Use after memory_search to inspect the exact cited memory before relying on or editing it.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Safe memory path: memory/MEMORY.md, memory/USER.md, memory/YYYY-MM-DD.md, or memory/topics/<topic>.md."},
+                    "from_line": {"type": "integer", "description": "Optional 1-based starting line."},
+                    "lines": {"type": "integer", "description": "Optional number of lines to read."},
+                },
+                "required": ["path"],
+            },
+            handler=memory_get,
+        ),
+        Tool(
+            name="memory_write",
+            description="Write or append to a safe memory Markdown file. This modifies Markdown only; SQLite search index is updated by synchronization. Use append=true for daily notes or adding entries; use memory_edit for precise updates.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Safe memory path: memory/MEMORY.md, memory/USER.md, memory/YYYY-MM-DD.md, or memory/topics/<topic>.md."},
+                    "content": {"type": "string", "description": "Markdown content to write or append."},
+                    "append": {"type": "boolean", "description": "Append instead of replacing the file. Default false."},
+                },
+                "required": ["path", "content"],
+            },
+            handler=memory_write,
+        ),
+        Tool(
+            name="memory_edit",
+            description="Precisely edit a safe memory Markdown file by replacing oldText with newText. Call memory_get first and provide exact oldText. The edit fails if oldText is missing or appears multiple times.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Safe memory Markdown path."},
+                    "oldText": {"type": "string", "description": "Exact existing text to replace. Must appear exactly once."},
+                    "newText": {"type": "string", "description": "Replacement text."},
+                },
+                "required": ["path", "oldText", "newText"],
+            },
+            handler=memory_edit,
+        ),
+        Tool(
+            name="memory_reindex",
+            description="Rebuild the SQLite memory index from Markdown memory files. Use after manual Markdown edits or when search appears stale.",
+            parameters={"type": "object", "properties": {}},
+            handler=memory_reindex,
+        ),
+        Tool(
+            name="remember",
+            description="Compatibility alias for old memory writes. Prefer memory_write or memory_edit. Stores content in memory/USER.md, memory/YYYY-MM-DD.md, or memory/topics/<topic>.md.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "content": {"type": "string"},
+                    "memory_type": {"type": "string"},
+                    "topic": {"type": "string"},
+                    "memory_date": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "source": {"type": "string"},
+                    "confidence": {"type": "number"},
                 },
                 "required": ["title", "content"],
             },
@@ -65,14 +129,14 @@ def get_memory_tools(service: MemoryService) -> list[Tool]:
         ),
         Tool(
             name="search_memory",
-            description="搜索长期记忆，返回相关片段。mode 支持 fts、vector、hybrid。",
+            description="Compatibility alias for memory_search. Prefer memory_search.",
             parameters={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "搜索查询"},
-                    "mode": {"type": "string", "description": "fts、vector 或 hybrid，默认 hybrid"},
-                    "memory_type": {"type": "string", "description": "可选记忆类型过滤"},
-                    "limit": {"type": "integer", "description": "最多返回条数，默认 5"},
+                    "query": {"type": "string"},
+                    "mode": {"type": "string"},
+                    "memory_type": {"type": "string"},
+                    "limit": {"type": "integer"},
                 },
                 "required": ["query"],
             },
@@ -80,27 +144,19 @@ def get_memory_tools(service: MemoryService) -> list[Tool]:
         ),
         Tool(
             name="read_memory",
-            description="按 memory_id 读取完整 Markdown 记忆文档。",
-            parameters={
-                "type": "object",
-                "properties": {"memory_id": {"type": "string", "description": "记忆 ID"}},
-                "required": ["memory_id"],
-            },
+            description="Compatibility alias for old memory ID reads. Prefer memory_get with a path and optional line range.",
+            parameters={"type": "object", "properties": {"memory_id": {"type": "string"}}, "required": ["memory_id"]},
             handler=read_memory,
         ),
         Tool(
             name="forget_memory",
-            description="按 memory_id 删除/遗忘整个 scoped Markdown 记忆文档，使其不再出现在检索结果中。注意：profile_user 会删除整个 profile/user.md，memory_<topic> 会删除整个主题文件。",
-            parameters={
-                "type": "object",
-                "properties": {"memory_id": {"type": "string", "description": "记忆 ID"}},
-                "required": ["memory_id"],
-            },
+            description="Compatibility alias for deleting an old memory ID. Prefer memory_edit or explicit file management when possible.",
+            parameters={"type": "object", "properties": {"memory_id": {"type": "string"}}, "required": ["memory_id"]},
             handler=forget_memory,
         ),
         Tool(
             name="reindex_memories",
-            description="从 Markdown 权威文件重建长期记忆 SQLite 索引。用于手动编辑 Markdown 或索引损坏后的修复。不会索引 .trash 中的已删除记忆。",
+            description="Compatibility alias for memory_reindex. Prefer memory_reindex.",
             parameters={"type": "object", "properties": {}},
             handler=reindex_memories,
         ),

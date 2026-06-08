@@ -165,6 +165,36 @@ class PrunedToolResultRepository:
             return []
         return data if isinstance(data, list) else []
 
+    def restored_events(self, keep_tokens: int) -> list[dict[str, Any]]:
+        index = self.read_index()
+        if not index.results:
+            return []
+        messages = self._load_messages()
+        records = []
+        for record in index.results.values():
+            if record.message_index < 0 or record.message_index >= len(messages):
+                continue
+            message = messages[record.message_index]
+            if message.get("role") != "tool" or str(message.get("tool_call_id", "")) != record.tool_call_id:
+                continue
+            content = str(message.get("content", ""))
+            if _hash_text(content) != record.content_hash:
+                continue
+            retained_tokens = estimate_text_tokens(content[:max(1, keep_tokens * 4)])
+            records.append({
+                "stage": "completed",
+                "reason": "restored_from_pruned_tool_results",
+                "prune_id": record.prune_id,
+                "tool_name": record.tool_name,
+                "tool_call_id": record.tool_call_id,
+                "original_tokens": record.original_estimated_tokens,
+                "retained_tokens": min(retained_tokens, record.original_estimated_tokens),
+                "omitted_tokens": max(0, record.original_estimated_tokens - retained_tokens),
+                "message_index": record.message_index,
+            })
+        records.sort(key=lambda item: (int(item["message_index"]), str(item["prune_id"])))
+        return records
+
 
 class ToolResultPruner:
     def __init__(self, config: ToolResultPruningConfig):
@@ -359,6 +389,10 @@ def get_pruned_tool_result_tools() -> list[Tool]:
             handler=read_pruned_tool_result,
         )
     ]
+
+
+def restored_pruning_records(session_dir: Path | None, keep_tokens: int = 2_000) -> list[dict[str, Any]]:
+    return PrunedToolResultRepository(session_dir).restored_events(keep_tokens)
 
 
 def _hash_text(text: str) -> str:

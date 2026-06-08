@@ -50,6 +50,7 @@ export interface ContextUsageEvent {
   user_tokens?: number
   assistant_tokens?: number
   tool_tokens?: number
+  pruning_records?: ContextPruningEvent[]
 }
 
 export interface ContextPruningEvent {
@@ -62,6 +63,7 @@ export interface ContextPruningEvent {
   retained_tokens?: number
   omitted_tokens?: number
   message_index?: number
+  pruning_records?: ContextPruningEvent[]
 }
 
 export interface SessionSummary {

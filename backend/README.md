@@ -243,7 +243,7 @@ Tool(
 - `miniclaw.tools.skills.SkillRepository` 负责索引 `backend/skills/`，并提供 Skill 列表、文件读取和文件树输出。
 - `miniclaw.tools.command.CommandRunner` 负责命令执行、工作目录、超时、输出拼接，并保留后续安全策略扩展点。
 - `miniclaw.tools.files.FileTools` 负责通用文件读取、列表/glob、文本搜索、写入和精确替换。
-- `miniclaw.memory.MemoryService` 负责长期记忆的 Markdown 存储、SQLite 索引、FTS 检索和可选向量检索。
+- `miniclaw.memory.MemoryService` 负责文件优先长期记忆、Markdown 存储、SQLite 同步索引、FTS 检索和可选向量检索。
 
 工具模块调用关系：
 
@@ -272,10 +272,12 @@ miniclaw.tools.registry.get_builtin_tools()
        └─ replace_text
 
   └─ get_memory_tools(MemoryService)
-       ├─ remember
-       ├─ search_memory
-       ├─ read_memory
-       └─ forget_memory
+       ├─ memory_search
+       ├─ memory_get
+       ├─ memory_write
+       ├─ memory_edit
+       ├─ memory_reindex
+       └─ remember/search_memory/read_memory/... # 兼容别名
 ```
 
 `backend/tools.py` 还保留这些兼容导出：
@@ -301,11 +303,12 @@ miniclaw.tools.registry.get_builtin_tools()
 | `search_text` | 在本地文本文件中搜索字符串或正则表达式 |
 | `write_file` | 写入本地文本文件，会创建缺失父目录并覆盖内容 |
 | `replace_text` | 对本地文本文件执行精确文本替换 |
-| `remember` | 保存一条 Markdown-backed 长期记忆并建立 SQLite 索引 |
-| `search_memory` | 搜索长期记忆，支持 `fts`、`vector`、`hybrid` 三种模式，返回相关片段 |
-| `read_memory` | 按 memory_id 读取完整 Markdown 记忆文档 |
-| `forget_memory` | 按 memory_id 删除/遗忘记忆，使其不再出现在检索结果中 |
-| `reindex_memories` | 从 Markdown 权威文件重建长期记忆 SQLite 索引 |
+| `memory_search` | 搜索长期记忆 Markdown 文件，返回 `path#Lx-Ly` 行号引用 |
+| `memory_get` | 按安全路径和可选行范围读取记忆 Markdown |
+| `memory_write` | 写入或追加安全记忆 Markdown；SQLite 由同步索引层更新 |
+| `memory_edit` | 精确替换记忆文件中的唯一 `oldText`，避免追加污染 |
+| `memory_reindex` | 从 Markdown 权威文件重建长期记忆 SQLite 索引 |
+| `remember` / `search_memory` / `read_memory` / `forget_memory` / `reindex_memories` | 旧工具兼容别名；新调用应优先使用 `memory_*` 工具 |
 
 通用文件工具当前不包含安全确认、权限分级或沙箱治理；这些能力会作为后续安全策略单独设计。
 
@@ -316,21 +319,23 @@ miniclaw.tools.registry.get_builtin_tools()
 ```text
 backend/memories/
 ├─ memory.sqlite
-├─ profile/user.md
-├─ memory/<topic>.md
-├─ daily/YYYY-MM-DD.md
-└─ .trash/
+└─ memory/
+   ├─ MEMORY.md
+   ├─ USER.md
+   ├─ YYYY-MM-DD.md
+   └─ topics/<topic>.md
 ```
 
-- Markdown 文件是完整记忆正文的权威来源，包含 frontmatter 元数据。
-- 记忆按 scoped Markdown 文档组织：`profile` 保存用户稳定偏好，`memory` 保存主题级长期事实，`daily` 保存当日摘要。
-- SQLite 存储 `memories`、`memory_chunks`、`memory_embeddings` 和 `memory_fts`。
-- `search_memory` 返回 chunk 级结果，包括 `memory_id`、`chunk_id`、Markdown 路径、位置、片段和读取完整文档的提示。
-- `read_memory(memory_id)` 返回完整 Markdown 文档。
+- Markdown 文件是完整记忆正文的唯一权威来源，SQLite 只是可重建索引。
+- `memory/USER.md` 保存用户画像和长期偏好，`memory/MEMORY.md` 保存高层长期事实/目录，`memory/YYYY-MM-DD.md` 保存每日记录，`memory/topics/*.md` 保存主题记忆。
+- SQLite 存储文件元数据、行级 chunk、`memory_fts` 和可选 `memory_embeddings`。
+- `memory_search` 会先同步 dirty/变更 Markdown，再返回 chunk 级结果，包括 `path`、`citation`、`startLine`、`endLine`、`snippet` 和 `score`。
+- `memory_get(path, from_line, lines)` 按路径和行范围读取 Markdown。
+- `memory_write` / `memory_edit` 只改 Markdown，不直接写检索索引；索引由 search 前同步或 `memory_reindex` 更新。
 - `fts` 模式使用 SQLite FTS5，并对中文生成 bigram 检索文本。
 - `vector` 模式需要配置 embedding；未配置时返回明确不可用提示。
 - `hybrid` 模式在 embedding 可用时合并 FTS 和 vector 结果；不可用时降级为 FTS。
-- `reindex_memories` 可在手动编辑 Markdown 或索引损坏后重建 SQLite 索引。
+- 稳定记忆可通过上下文准备阶段注入：默认加载 `memory/USER.md` 和 `memory/MEMORY.md` 的有界内容，daily/topic 文件保持按需搜索。
 
 ## 8. Skill 系统
 
