@@ -1,143 +1,74 @@
 """MiniClaw Claw — 上下文管理与 Agent 编排层"""
 
-import json
 import logging
-import shutil
-import uuid
-from datetime import datetime, timezone
-from pathlib import Path
+import asyncio
 from typing import AsyncIterator
 
-from .types import Event
+from .types import Event, PermissionResponseDecision, ToolPermissionRequest
 from .agent import Agent
 from .conversation import ConversationService
 from .run_coordinator import RunCoordinator, RunEmit, SessionJob
-from .session_history import (
-    PaginatedMessagesResponse,
-    SessionSummary,
-    paginate_display_messages,
-    present_messages,
-)
+from .session_history import PaginatedMessagesResponse, SessionSummary
+from .session_store import SessionManager
 from .transport import project_event
 
 logger = logging.getLogger(__name__)
 
 
-class SessionManager:
-    """会话持久化管理器"""
+class PermissionCoordinator:
+    def __init__(self):
+        self._pending: dict[str, ToolPermissionRequest] = {}
+        self._futures: dict[str, asyncio.Future[str]] = {}
+        self._session_policies: dict[str, dict[str, str]] = {}
 
-    def __init__(self, sessions_dir: Path | str | None = None):
-        if sessions_dir is None:
-            self.sessions_dir = Path(__file__).parent.parent / "sessions"
-        else:
-            self.sessions_dir = Path(sessions_dir)
-        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+    def create_request(self, request: ToolPermissionRequest) -> ToolPermissionRequest:
+        self._pending[request.request_id] = request
+        self._futures[request.request_id] = asyncio.get_running_loop().create_future()
+        return request
 
-    def create_session(self) -> str:
-        """创建新会话，返回 session_id"""
-        session_id = uuid.uuid4().hex[:12]
-        session_path = self.sessions_dir / session_id
-        session_path.mkdir(parents=True, exist_ok=True)
+    async def wait_for_decision(self, request_id: str) -> str:
+        future = self._futures.get(request_id)
+        if future is None:
+            raise RuntimeError("Permission request not found")
+        return await future
 
-        chat_file = session_path / "chat.json"
-        chat_file.write_text("[]", encoding="utf-8")
+    def get_session_policy(self, session_id: str, tool_name: str) -> str | None:
+        return self._session_policies.get(session_id, {}).get(tool_name)
 
-        return session_id
+    def set_session_policy(self, session_id: str, tool_name: str, decision: str) -> None:
+        session_rules = self._session_policies.setdefault(session_id, {})
+        session_rules[tool_name] = decision
 
-    def get_chat_file(self, session_id: str) -> Path:
-        return self.sessions_dir / session_id / "chat.json"
+    def resolve(self, request_id: str, decision: PermissionResponseDecision) -> ToolPermissionRequest | None:
+        request = self._pending.get(request_id)
+        future = self._futures.get(request_id)
+        if request is None or future is None:
+            return None
+        request.status = "approved" if decision in {"allow_once", "allow_session"} else "denied"
+        if decision == "allow_session":
+            self.set_session_policy(request.session_id, request.tool_name, "allow")
+        elif decision == "deny_session":
+            self.set_session_policy(request.session_id, request.tool_name, "deny")
+        if not future.done():
+            future.set_result(decision)
+        self._pending.pop(request_id, None)
+        self._futures.pop(request_id, None)
+        return request
 
-    def get_session_path(self, session_id: str) -> Path:
-        return self.sessions_dir / session_id
-
-    def session_exists(self, session_id: str) -> bool:
-        return self.get_chat_file(session_id).exists()
-
-    def delete_session(self, session_id: str) -> bool:
-        """Delete a session directory if it exists."""
-        session_path = (self.sessions_dir / session_id).resolve()
-        sessions_root = self.sessions_dir.resolve()
-
-        if sessions_root != session_path and sessions_root not in session_path.parents:
-            raise ValueError("Session path escapes sessions directory")
-        if not self.session_exists(session_id):
-            return False
-
-        shutil.rmtree(session_path)
-        return True
-
-    def load_messages(self, session_id: str) -> list[dict]:
-        """加载会话历史消息"""
-        chat_file = self.get_chat_file(session_id)
-        if not chat_file.exists():
-            return []
-
-        try:
-            text = chat_file.read_text(encoding="utf-8")
-            if not text.strip():
-                return []
-            return json.loads(text)
-        except (json.JSONDecodeError, Exception):
-            return []
-
-    def save_messages(self, session_id: str, messages: list[dict]) -> None:
-        """保存完整消息列表"""
-        chat_file = self.get_chat_file(session_id)
-        chat_file.parent.mkdir(parents=True, exist_ok=True)
-        chat_file.write_text(
-            json.dumps(messages, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
-
-    def append_message(self, session_id: str, message: dict) -> None:
-        """追加单条消息"""
-        messages = self.load_messages(session_id)
-        messages.append(message)
-        self.save_messages(session_id, messages)
-
-    def list_sessions(self) -> list[SessionSummary]:
-        """List sessions with derived summary metadata."""
-        sessions: list[SessionSummary] = []
-
-        for session_path in self.sessions_dir.iterdir():
-            if not session_path.is_dir():
+    def clear_session(self, session_id: str) -> None:
+        self._session_policies.pop(session_id, None)
+        for request_id, request in list(self._pending.items()):
+            if request.session_id != session_id:
                 continue
-            chat_file = session_path / "chat.json"
-            if not chat_file.exists():
-                continue
+            future = self._futures.get(request_id)
+            request.status = "expired"
+            if future is not None and not future.done():
+                future.set_result("deny_once")
+            self._pending.pop(request_id, None)
+            self._futures.pop(request_id, None)
 
-            messages = self.load_messages(session_path.name)
-            display_messages = present_messages(messages)
-            stat = chat_file.stat()
-            sessions.append(
-                SessionSummary(
-                    session_id=session_path.name,
-                    title=self._session_title(messages),
-                    created_at=self._format_timestamp(getattr(stat, "st_ctime", stat.st_mtime)),
-                    updated_at=self._format_timestamp(stat.st_mtime),
-                    message_count=len(display_messages),
-                )
-            )
-
-        return sorted(sessions, key=lambda session: session.updated_at, reverse=True)
-
-    def get_messages_page(
-        self, session_id: str, before: int | None = None, limit: int = 20
-    ) -> PaginatedMessagesResponse:
-        messages = self.load_messages(session_id)
-        display_messages = present_messages(messages)
-        return paginate_display_messages(display_messages, before=before, limit=limit)
-
-    def _session_title(self, messages: list[dict]) -> str:
-        for message in messages:
-            if message.get("role") == "user":
-                content = str(message.get("content") or "").strip()
-                if content:
-                    return content[:40]
-        return "New chat"
-
-    def _format_timestamp(self, timestamp: float) -> str:
-        return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+    def get(self, request_id: str) -> ToolPermissionRequest | None:
+        return self._pending.get(request_id)
 
 
 class Claw:
@@ -161,6 +92,7 @@ class Claw:
         self.session_manager = session_manager or SessionManager()
         self.conversation = ConversationService(agent=agent, session_manager=self.session_manager)
         self.run_coordinator = RunCoordinator(self._execute_job)
+        self.permission_coordinator = PermissionCoordinator()
 
     def create_session(self) -> str:
         """创建新会话"""
@@ -179,6 +111,36 @@ class Claw:
 
     def get_context_usage(self, session_id: str) -> Event:
         return self.conversation.get_context_usage(session_id)
+
+    def get_run_summary(self, session_id: str, run_id: str) -> dict | None:
+        return self.session_manager.load_run_summary(session_id, run_id)
+
+    def list_run_summaries(self, session_id: str) -> dict[str, dict]:
+        return self.session_manager.list_run_summaries(session_id)
+
+    def create_tool_permission_request(self, request: ToolPermissionRequest) -> ToolPermissionRequest:
+        return self.permission_coordinator.create_request(request)
+
+    async def wait_for_tool_permission(self, request_id: str) -> str:
+        return await self.permission_coordinator.wait_for_decision(request_id)
+
+    async def request_tool_permission(self, request: ToolPermissionRequest) -> str:
+        self.permission_coordinator.create_request(request)
+        return await self.permission_coordinator.wait_for_decision(request.request_id)
+
+    def get_session_tool_policy(self, session_id: str, tool_name: str) -> str | None:
+        return self.permission_coordinator.get_session_policy(session_id, tool_name)
+
+    def respond_tool_permission(
+        self,
+        session_id: str,
+        request_id: str,
+        decision: PermissionResponseDecision,
+    ) -> bool:
+        request = self.permission_coordinator.get(request_id)
+        if request is None or request.session_id != session_id:
+            return False
+        return self.permission_coordinator.resolve(request_id, decision) is not None
 
     async def chat(self, session_id: str, user_message: str) -> AsyncIterator[Event]:
         """
@@ -220,14 +182,22 @@ class Claw:
         return await self.run_coordinator.clear_queue(session_id, emit)
 
     async def stop_session(self, session_id: str, emit: RunEmit | None = None) -> int:
+        self.permission_coordinator.clear_session(session_id)
         return await self.run_coordinator.stop_session(session_id, emit)
 
     async def stop_all_sessions(self) -> None:
+        for session_id in list(self.run_coordinator.session_queues) + list(self.run_coordinator.session_current_jobs):
+            self.permission_coordinator.clear_session(session_id)
         await self.run_coordinator.stop_all_sessions()
 
     async def _execute_job(self, job: SessionJob) -> None:
         try:
-            async for event in self.conversation.chat(job.session_id, job.message):
+            async for event in self.conversation.chat(
+                job.session_id,
+                job.message,
+                run_id=job.run_id,
+                cancel_event=job.cancel_event,
+            ):
                 await job.emit(project_event(event, job.session_id, job.run_id))
         except Exception as exc:
             logger.exception("Session %s run %s failed", job.session_id, job.run_id)

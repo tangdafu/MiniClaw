@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import AsyncIterator, Protocol
 
@@ -13,6 +14,7 @@ class SessionRepository(Protocol):
     def load_messages(self, session_id: str) -> list[dict]: ...
     def save_messages(self, session_id: str, messages: list[dict]) -> None: ...
     def get_session_path(self, session_id: str) -> Path: ...
+    def save_run_summary(self, session_id: str, run_id: str, summary: dict) -> None: ...
 
 
 class ChatAgent(Protocol):
@@ -21,6 +23,8 @@ class ChatAgent(Protocol):
         messages: list[dict],
         user_message: str,
         session_dir: Path | None = None,
+        run_id: str | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> AsyncIterator[Event]: ...
 
 
@@ -29,19 +33,54 @@ class ConversationService:
         self.agent = agent
         self.session_manager = session_manager
 
-    async def chat(self, session_id: str, user_message: str) -> AsyncIterator[Event]:
+    async def chat(
+        self,
+        session_id: str,
+        user_message: str,
+        run_id: str | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ) -> AsyncIterator[Event]:
         logger.info("Session %s: user message received", session_id)
         messages = self.session_manager.load_messages(session_id)
         session_dir = self.session_manager.get_session_path(session_id)
         try:
-            async for event in self.agent.chat(messages, user_message, session_dir=session_dir):
+            async for event in self.agent.chat(
+                messages,
+                user_message,
+                session_dir=session_dir,
+                run_id=run_id,
+                cancel_event=cancel_event,
+            ):
                 yield event
         except asyncio.CancelledError:
             self.session_manager.save_messages(session_id, messages)
+            self._save_run_summary(session_id, run_id)
+            raise
+        except Exception:
+            self.session_manager.save_messages(session_id, messages)
+            self._save_run_summary(session_id, run_id)
             raise
         else:
             self.session_manager.save_messages(session_id, messages)
+            self._save_run_summary(session_id, run_id)
             logger.info("Session %s: conversation saved", session_id)
+
+    def _save_run_summary(self, session_id: str, run_id: str | None) -> None:
+        if not run_id:
+            return
+        runtime = getattr(self.agent, "runtime", None)
+        summary = getattr(runtime, "last_run_summary", None)
+        if summary is None:
+            return
+        if is_dataclass(summary):
+            payload = asdict(summary)
+        elif isinstance(summary, dict):
+            payload = dict(summary)
+        else:
+            return
+        payload.setdefault("run_id", run_id)
+        payload.setdefault("session_id", session_id)
+        self.session_manager.save_run_summary(session_id, run_id, payload)
 
     def get_context_usage(self, session_id: str) -> Event:
         messages = self.session_manager.load_messages(session_id)

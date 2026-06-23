@@ -11,7 +11,7 @@
       </div>
     </div>
 
-    <ChatMessage v-for="(message, index) in messages" :key="index" :message="message" />
+    <ChatMessage v-for="message in messages" :key="message.clientKey" :message="message" />
 
     <div v-if="isGenerating" class="generation-status">
       <span></span><span></span><span></span>

@@ -5,6 +5,37 @@
       <div v-if="message.role === 'user'" class="plain-text">{{ message.content }}</div>
       <div v-else-if="message.isError" class="error-text">{{ message.content }}</div>
       <template v-else>
+        <div v-if="message.role === 'assistant' && message.runId" class="run-meta">
+          <span class="run-chip" :class="message.status">{{ runStatusLabel }}</span>
+          <code>{{ message.runId }}</code>
+        </div>
+        <section v-if="message.runSummary" class="run-summary-block">
+          <div class="run-summary-grid">
+            <div>
+              <span>开始</span>
+              <strong>{{ formatTimestamp(message.runSummary.started_at) }}</strong>
+            </div>
+            <div>
+              <span>结束</span>
+              <strong>{{ formatTimestamp(message.runSummary.finished_at) }}</strong>
+            </div>
+            <div>
+              <span>工具调用</span>
+              <strong>{{ message.runSummary.tool_calls_total }}</strong>
+            </div>
+            <div>
+              <span>已阻止</span>
+              <strong>{{ message.runSummary.tool_calls_blocked }}</strong>
+            </div>
+          </div>
+          <p v-if="message.runSummary.summary_text" class="run-summary-text">{{ message.runSummary.summary_text }}</p>
+          <div v-if="message.runSummary.changed_files?.length" class="run-summary-files">
+            <div class="run-summary-files-title">变更文件</div>
+            <ul>
+              <li v-for="file in message.runSummary.changed_files" :key="file">{{ file }}</li>
+            </ul>
+          </div>
+        </section>
         <ReasoningBlock v-if="message.reasoning" :reasoning="message.reasoning" />
         <section v-if="message.compressionEvents?.length" class="compression-block">
           <button class="compression-title" @click="isCompressionOpen = !isCompressionOpen">
@@ -47,8 +78,28 @@ const avatarLabel = computed(() => {
 
 const placeholderText = computed(() => {
   if (props.message.status === 'queued') return '已加入队列，等待执行...'
+  if (props.message.status === 'cancelling') return '正在取消运行...'
   if (props.message.status === 'cancelled') return '已停止生成'
   return '正在生成回复...'
+})
+
+const runStatusLabel = computed(() => {
+  switch (props.message.status) {
+    case 'queued':
+      return '排队中'
+    case 'running':
+      return '运行中'
+    case 'cancelling':
+      return '取消中'
+    case 'cancelled':
+      return '已取消'
+    case 'done':
+      return '已完成'
+    case 'error':
+      return '出错'
+    default:
+      return '运行中'
+  }
 })
 
 function compressionDetail(event: CompressionEvent): string {
@@ -62,6 +113,13 @@ function compressionDetail(event: CompressionEvent): string {
   if (event.estimated_tokens_after) parts.push(`压缩后 ${event.estimated_tokens_after}`)
   if (event.detail) parts.push(event.detail)
   return parts.join(' · ')
+}
+
+function formatTimestamp(value?: string | null): string {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
 }
 
 </script>
@@ -144,12 +202,109 @@ function compressionDetail(event: CompressionEvent): string {
   font-size: 14px;
 }
 
+.run-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.run-meta code {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.run-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.run-chip.queued,
+.run-chip.cancelling {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.run-chip.cancelled,
+.run-chip.error {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.run-chip.done {
+  background: #dcfce7;
+  color: #15803d;
+}
+
 .compression-block {
   margin-bottom: var(--space-3);
   border: 1px solid #fde68a;
   border-radius: var(--radius-lg);
   background: #fffbeb;
   overflow: hidden;
+}
+
+.run-summary-block {
+  margin-bottom: var(--space-3);
+  padding: 12px;
+  border: 1px solid #bfdbfe;
+  border-radius: var(--radius-lg);
+  background: #f8fbff;
+}
+
+.run-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.run-summary-grid div {
+  display: grid;
+  gap: 4px;
+}
+
+.run-summary-grid span,
+.run-summary-files-title {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.run-summary-grid strong,
+.run-summary-text,
+.run-summary-files li {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.run-summary-text {
+  margin: 10px 0 0;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.run-summary-files {
+  margin-top: 10px;
+}
+
+.run-summary-files ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.run-summary-files li {
+  line-height: 1.6;
+  word-break: break-all;
 }
 
 .compression-title {

@@ -1,7 +1,28 @@
 """MiniClaw Agent - 核心类型定义"""
 
+from dataclasses import dataclass
 from typing import Any, Callable, ClassVar, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_serializer
+
+
+@dataclass
+class ToolPermissionRequest:
+    request_id: str
+    session_id: str
+    run_id: str
+    tool_call_id: str
+    tool_name: str
+    arguments: dict[str, Any]
+    arguments_text: str
+    category: str
+    risk_level: Literal["low", "medium", "high"]
+    reason: str | None = None
+    policy: str | None = None
+    status: Literal["pending", "approved", "denied", "expired"] = "pending"
+    created_at: str | None = None
+
+
+PermissionResponseDecision = Literal["allow_once", "deny_once", "allow_session", "deny_session"]
 
 
 class Message(BaseModel):
@@ -48,12 +69,19 @@ class Tool(BaseModel):
         }
 
 
+@dataclass(frozen=True)
+class ToolGovernanceDecision:
+    action: Literal["allow", "deny", "confirm"]
+    reason: str | None = None
+    policy: str | None = None
+
+
 class Event(BaseModel):
     """Agent 流式事件"""
 
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["text", "reasoning", "tool_call", "tool_result", "done", "error", "session_created", "context_compression", "context_usage", "context_pruning"]
+    type: Literal["text", "reasoning", "tool_call", "tool_result", "done", "error", "session_created", "context_compression", "context_usage", "context_pruning", "tool_permission_request"]
     data: dict[str, Any] = Field(default_factory=dict)
 
     _default_values: ClassVar[dict[str, Any]] = {
@@ -69,6 +97,8 @@ class Event(BaseModel):
         "prune_id": "",
         "tool_name": "",
         "tool_call_id": "",
+        "request_id": "",
+        "tool_name": "",
         "estimated_tokens": None,
         "trigger_tokens": None,
         "target_tokens": None,
@@ -142,6 +172,10 @@ class Event(BaseModel):
     @staticmethod
     def context_pruning(**kwargs) -> "Event":
         return Event.create("context_pruning", **kwargs)
+
+    @staticmethod
+    def tool_permission_request(**kwargs) -> "Event":
+        return Event.create("tool_permission_request", **kwargs)
 
     def model_dump(self, **kwargs) -> dict:
         """自定义序列化，将 error_msg 映射为 error 键"""

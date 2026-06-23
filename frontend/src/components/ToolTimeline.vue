@@ -7,10 +7,11 @@
     </button>
 
     <div v-if="isOpen" class="timeline-list">
-      <article v-for="(pair, index) in toolPairs" :key="index" class="tool-entry">
+      <article v-for="(pair, index) in toolPairs" :key="pair.call.toolCallId || index" class="tool-entry">
         <button class="tool-summary" @click="toggle(index)">
-          <span class="status-dot"></span>
+          <span class="status-dot" :class="pair.call.status || 'completed'"></span>
           <span class="tool-name">{{ pair.call.name || 'tool' }}</span>
+          <span class="tool-state">{{ toolStateLabel(pair.call.status) }}</span>
           <span class="tool-preview">{{ preview(pair.result || pair.call.arguments) }}</span>
           <span class="expand">{{ expanded.has(index) ? '收起' : '详情' }}</span>
         </button>
@@ -19,6 +20,14 @@
           <div class="detail-block">
             <div class="detail-label">参数</div>
             <pre>{{ pair.call.arguments || '{}' }}</pre>
+          </div>
+          <div v-if="pair.call.blockedReason" class="detail-block">
+            <div class="detail-label">阻止原因</div>
+            <pre>{{ pair.call.blockedReason }}</pre>
+          </div>
+          <div v-if="pair.call.changedFiles?.length" class="detail-block">
+            <div class="detail-label">变更文件</div>
+            <pre>{{ pair.call.changedFiles.join('\n') }}</pre>
           </div>
           <div class="detail-block">
             <div class="detail-label">结果</div>
@@ -32,7 +41,7 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
-import type { ToolPair } from '../types/chat'
+import type { ToolCall, ToolPair } from '../types/chat'
 
 defineProps<{
   toolPairs: ToolPair[]
@@ -49,6 +58,19 @@ function toggle(index: number) {
     next.add(index)
   }
   expanded.value = next
+}
+
+function toolStateLabel(status?: ToolCall['status']): string {
+  switch (status) {
+    case 'pending':
+      return '待执行'
+    case 'running':
+      return '执行中'
+    case 'blocked':
+      return '已阻止'
+    default:
+      return '已完成'
+  }
 }
 
 function preview(value: string): string {
@@ -125,6 +147,23 @@ function preview(value: string): string {
   background: #22c55e;
   box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.12);
   flex: 0 0 auto;
+}
+
+.status-dot.pending,
+.status-dot.running {
+  background: #f59e0b;
+  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.12);
+}
+
+.status-dot.blocked {
+  background: #ef4444;
+  box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.12);
+}
+
+.tool-state {
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .tool-preview {

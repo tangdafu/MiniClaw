@@ -1,7 +1,8 @@
 import os
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Awaitable, Callable
 
 from openai import AsyncOpenAI
 
@@ -87,7 +88,13 @@ class AgentConfig:
 class Agent:
     """Public facade for MiniClaw chat runtime."""
 
-    def __init__(self, config: AgentConfig, tools: list[Tool] | None = None):
+    def __init__(
+        self,
+        config: AgentConfig,
+        tools: list[Tool] | None = None,
+        request_tool_permission: Callable[..., Awaitable[str]] | None = None,
+        get_session_tool_policy: Callable[[str, str], str | None] | None = None,
+    ):
         self.config = config
         self.client = AsyncOpenAI(
             api_key=config.api_key,
@@ -105,6 +112,8 @@ class Agent:
             system_prompt=self.system_prompt,
             max_iterations=self.max_iterations,
             context_compression=self.context_compression,
+            request_tool_permission=request_tool_permission,
+            get_session_tool_policy=get_session_tool_policy,
         )
 
     async def chat(
@@ -112,6 +121,14 @@ class Agent:
         messages: list[dict],
         user_message: str,
         session_dir: Path | None = None,
+        run_id: str | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> AsyncIterator[Event]:
-        async for event in self.runtime.run(messages, user_message, session_dir=session_dir):
+        async for event in self.runtime.run(
+            messages,
+            user_message,
+            session_dir=session_dir,
+            run_id=run_id,
+            cancel_event=cancel_event,
+        ):
             yield event

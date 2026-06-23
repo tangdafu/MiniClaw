@@ -15,6 +15,7 @@ class SessionJob:
     priority: int = 10
     sequence: int = 0
     status: Literal["queued", "running", "done", "cancelled", "error"] = "queued"
+    cancel_event: asyncio.Event = field(default_factory=asyncio.Event, compare=False)
 
 
 @dataclass(order=True)
@@ -67,6 +68,9 @@ class RunCoordinator:
         return run_id
 
     async def cancel_current(self, session_id: str) -> bool:
+        job = self.session_current_jobs.get(session_id)
+        if job is not None:
+            job.cancel_event.set()
         task = self.session_current_tasks.get(session_id)
         if not task or task.done():
             return False

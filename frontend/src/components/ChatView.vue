@@ -119,6 +119,29 @@
       </p>
     </aside>
 
+    <div v-if="activePermissionRequest" class="modal-backdrop" @click.stop>
+      <section class="delete-modal permission-modal" role="dialog" aria-modal="true" aria-labelledby="permission-title" @click.stop>
+        <div class="delete-icon">权</div>
+        <div class="delete-copy">
+          <p class="modal-kicker">工具权限</p>
+          <h3 id="permission-title">允许执行这个工具吗？</h3>
+          <p class="delete-session-name">{{ activePermissionRequest.tool_name }}</p>
+          <p class="delete-description">
+            风险级别：{{ activePermissionRequest.risk_level || 'unknown' }}
+            <span v-if="activePermissionRequest.category"> · 分类：{{ activePermissionRequest.category }}</span>
+          </p>
+          <p class="permission-note">会话级策略仅在当前会话有效，后端重启或删除会话后失效。</p>
+          <pre class="permission-arguments">{{ activePermissionRequest.arguments }}</pre>
+        </div>
+        <div class="modal-actions permission-actions">
+          <button class="secondary-action" :disabled="permissionRequestBusy" @click="resolveToolPermission(activePermissionRequest.request_id, 'deny_once')">拒绝一次</button>
+          <button class="secondary-action" :disabled="permissionRequestBusy" @click="resolveToolPermission(activePermissionRequest.request_id, 'deny_session')">本会话始终拒绝</button>
+          <button class="secondary-action" :disabled="permissionRequestBusy" @click="resolveToolPermission(activePermissionRequest.request_id, 'allow_once')">允许一次</button>
+          <button class="danger-action" :disabled="permissionRequestBusy" @click="resolveToolPermission(activePermissionRequest.request_id, 'allow_session')">本会话始终允许</button>
+        </div>
+      </section>
+    </div>
+
     <div v-if="deleteTarget" class="modal-backdrop" @click="cancelDelete">
       <section class="delete-modal" role="dialog" aria-modal="true" aria-labelledby="delete-title" @click.stop>
         <div class="delete-icon">删</div>
@@ -142,24 +165,13 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import ChatInput from './ChatInput.vue'
 import MessageList from './MessageList.vue'
 import SessionSidebar from './SessionSidebar.vue'
-import type { ContextPruningEvent, ContextUsageEvent, Message, MessagePage, SessionSummary, StreamEvent, ToolCall } from '../types/chat'
-
-interface SessionRuntimeState {
-  messages: Message[]
-  isProcessing: boolean
-  pendingToolCalls: Record<string, ToolCall>
-  activeRunId: string
-  queuedCount: number
-  contextUsage?: ContextUsageEvent
-  pruningEvents: ContextPruningEvent[]
-  nextBefore: number | null
-  hasMore: boolean
-  isLoadingHistory: boolean
-  hasLoadedHistory: boolean
-}
+import { createOptimisticUserMessage, createRuntimeState, normalizeMessage, useSessionRuntimeState } from '../composables/useSessionRuntimeState'
+import { useChatSessions } from '../composables/useChatSessions'
+import { useContextUsagePanel, useMessageHistory } from '../composables/useMessageHistory'
+import { useChatTransport } from '../composables/useChatTransport'
+import type { SessionSummary } from '../types/chat'
 
 const sessions = ref<SessionSummary[]>([])
-const sessionStates = ref<Record<string, SessionRuntimeState>>({})
 const inputText = ref('')
 const isConnected = ref(false)
 const isLoadingSessions = ref(false)
@@ -168,449 +180,102 @@ const sessionId = ref('')
 const messageListRef = ref<InstanceType<typeof MessageList>>()
 const chatInputRef = ref<InstanceType<typeof ChatInput>>()
 const deleteTarget = ref<SessionSummary | null>(null)
-const usagePanelOpen = ref(false)
+const permissionRequestBusy = ref(false)
 
-let ws: WebSocket | null = null
-let shouldReconnect = true
+const {
+  sessionStates,
+  activeRuntime,
+  activeMessages,
+  activeContextUsage,
+  activePruningEvents,
+  activePermissionRequest,
+  runningSessionIds,
+  queuedCounts,
+  ensureSessionState,
+  ensureAssistantForRun,
+  clearPendingPermissionRequestsForRun,
+  clearPendingToolCallsForRun,
+  upsertPruningEvent,
+  pruningEventKey,
+  markQueuedMessagesCancelled,
+} = useSessionRuntimeState(sessionId)
 
-const emptyRuntime: SessionRuntimeState = {
-  messages: [],
-  isProcessing: false,
-  pendingToolCalls: {},
-  activeRunId: '',
-  queuedCount: 0,
-  contextUsage: undefined,
-  pruningEvents: [],
-  nextBefore: null,
-  hasMore: false,
-  isLoadingHistory: false,
-  hasLoadedHistory: false,
-}
+const {
+  loadSessions,
+  createNewSession,
+  selectSession,
+  deleteSession,
+  cancelDelete,
+  confirmDeleteSession,
+  fetchJson,
+} = useChatSessions({
+  sessions,
+  sessionId,
+  sessionStates,
+  isLoadingSessions,
+  globalError,
+  deleteTarget,
+  createRuntimeState,
+  getLoadContextUsage: () => loadContextUsage,
+  getLoadLatestMessages: () => loadLatestMessages,
+  focusInput: () => {
+    void nextTick()
+    chatInputRef.value?.focus()
+  },
+})
+
+const {
+  usagePanelOpen,
+  loadContextUsage,
+  usagePercent,
+  usageBreakdownRows,
+} = useContextUsagePanel({
+  activeRuntime,
+  ensureSessionState,
+  fetchJson,
+})
+
+const {
+  loadRunSummary,
+  loadLatestMessages,
+  loadOlderMessages,
+} = useMessageHistory({
+  sessionId,
+  globalError,
+  messageListRef,
+  ensureSessionState,
+  normalizeMessage,
+  fetchJson,
+  loadContextUsage,
+})
+
+const {
+  connectWebSocket,
+  sendMessage,
+  sendControl,
+  resolveToolPermission,
+  dispose,
+} = useChatTransport({
+  sessionId,
+  globalError,
+  inputText,
+  isConnected,
+  permissionRequestBusy,
+  messageListRef,
+  ensureSessionState,
+  ensureAssistantForRun,
+  clearPendingPermissionRequestsForRun,
+  clearPendingToolCallsForRun,
+  upsertPruningEvent,
+  markQueuedMessagesCancelled,
+  createOptimisticUserMessage,
+  loadRunSummary,
+  loadSessions,
+})
 
 const activeTitle = computed(() => {
   return sessions.value.find((session) => session.session_id === sessionId.value)?.title || '新会话'
 })
-
-const activeRuntime = computed(() => sessionId.value ? ensureSessionState(sessionId.value) : emptyRuntime)
-const activeMessages = computed(() => activeRuntime.value.messages)
-const activeContextUsage = computed(() => activeRuntime.value.contextUsage)
-const activePruningEvents = computed(() => activeRuntime.value.pruningEvents)
-const usagePercent = computed(() => {
-  const used = activeContextUsage.value?.estimated_tokens ?? 0
-  const total = activeContextUsage.value?.trigger_tokens ?? 0
-  if (total <= 0) return 0
-  return Math.min(100, Math.round((used / total) * 100))
-})
-const usageBreakdownRows = computed(() => {
-  const usage = activeContextUsage.value
-  return [
-    { label: '系统提示词', description: '动态 system prompt', value: usage?.system_tokens },
-    { label: '摘要', description: 'model_context.json 压缩摘要', value: usage?.summary_tokens_breakdown ?? usage?.summary_tokens },
-    { label: '用户输入', description: 'role=user 的消息', value: usage?.user_tokens },
-    { label: 'Assistant', description: 'assistant 回复和 tool_calls', value: usage?.assistant_tokens },
-    { label: '工具返回', description: 'role=tool 的工具结果', value: usage?.tool_tokens },
-  ]
-})
-const runningSessionIds = computed(() => Object.entries(sessionStates.value)
-  .filter(([, state]) => state.isProcessing)
-  .map(([id]) => id))
-const queuedCounts = computed(() => Object.fromEntries(
-  Object.entries(sessionStates.value).map(([id, state]) => [id, state.queuedCount]),
-))
-
-function connectWebSocket() {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const wsUrl = `${protocol}//${window.location.host}/ws/chat`
-
-  ws = new WebSocket(wsUrl)
-
-  ws.onopen = () => {
-    isConnected.value = true
-    globalError.value = ''
-  }
-
-  ws.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data) as StreamEvent
-      if (data.type === 'session_created' && data.session_id) {
-        sessionId.value = data.session_id
-        ensureSessionState(data.session_id)
-        void loadSessions()
-        return
-      }
-      handleEvent(data)
-    } catch {
-      // Ignore malformed stream events.
-    }
-  }
-
-  ws.onclose = () => {
-    isConnected.value = false
-    if (shouldReconnect) {
-      globalError.value = '连接已断开，正在重连...'
-      setTimeout(connectWebSocket, 3000)
-    }
-  }
-
-  ws.onerror = () => {
-    isConnected.value = false
-    globalError.value = '连接失败，请确认后端服务正在运行。'
-  }
-}
-
-async function loadSessions() {
-  isLoadingSessions.value = true
-  try {
-    const data = await fetchJson<{ sessions: SessionSummary[] }>('/sessions')
-    sessions.value = data.sessions
-
-    if (!sessionId.value && sessions.value.length > 0) {
-      await selectSession(sessions.value[0].session_id)
-    } else if (!sessionId.value) {
-      await createNewSession()
-    }
-  } catch (error) {
-    globalError.value = error instanceof Error ? error.message : '加载会话失败'
-  } finally {
-    isLoadingSessions.value = false
-  }
-}
-
-async function createNewSession() {
-  try {
-    const data = await fetchJson<{ session_id: string }>('/sessions', { method: 'POST' })
-    sessionId.value = data.session_id
-    sessionStates.value[data.session_id] = createRuntimeState()
-    await loadSessions()
-    await nextTick()
-    chatInputRef.value?.focus()
-  } catch (error) {
-    globalError.value = error instanceof Error ? error.message : '创建会话失败'
-  }
-}
-
-async function deleteSession(id: string) {
-  const state = sessionStates.value[id]
-  if (state?.isProcessing || state?.queuedCount) {
-    globalError.value = '该会话还有运行中或排队任务，请先停止后再删除。'
-    return
-  }
-
-  const target = sessions.value.find((session) => session.session_id === id)
-  if (!target) return
-  deleteTarget.value = target
-}
-
-function cancelDelete() {
-  deleteTarget.value = null
-}
-
-async function confirmDeleteSession() {
-  if (!deleteTarget.value) return
-
-  const id = deleteTarget.value.session_id
-  deleteTarget.value = null
-
-  try {
-    await fetchJson<{ deleted: boolean; session_id: string }>(`/sessions/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-    })
-
-    const wasActive = id === sessionId.value
-    const remainingSessions = sessions.value.filter((session) => session.session_id !== id)
-    sessions.value = remainingSessions
-
-    if (!wasActive) {
-      await loadSessions()
-      return
-    }
-
-    delete sessionStates.value[id]
-    sessionId.value = ''
-
-    if (remainingSessions.length > 0) {
-      await selectSession(remainingSessions[0].session_id)
-      await loadSessions()
-    } else {
-      await createNewSession()
-    }
-  } catch (error) {
-    globalError.value = error instanceof Error ? error.message : '删除会话失败'
-  }
-}
-
-async function selectSession(id: string) {
-  if (id === sessionId.value) return
-
-  sessionId.value = id
-  const state = ensureSessionState(id)
-  if (!state.hasLoadedHistory && state.messages.length === 0) {
-    await loadLatestMessages(id)
-  } else {
-    void loadContextUsage(id)
-    await nextTick()
-    messageListRef.value?.scrollToBottom()
-  }
-}
-
-async function loadLatestMessages(id: string) {
-  const state = ensureSessionState(id)
-  state.isLoadingHistory = true
-  try {
-    const page = await fetchMessagePage(id)
-    if (!state.isProcessing && state.queuedCount === 0) {
-      state.messages = page.items.map(normalizeMessage)
-    }
-    state.nextBefore = page.next_before
-    state.hasMore = page.has_more
-    state.hasLoadedHistory = true
-    void loadContextUsage(id)
-    messageListRef.value?.scrollToBottom()
-  } catch (error) {
-    globalError.value = error instanceof Error ? error.message : '加载消息失败'
-  } finally {
-    state.isLoadingHistory = false
-  }
-}
-
-async function loadOlderMessages() {
-  if (!sessionId.value) return
-  const state = ensureSessionState(sessionId.value)
-  if (!state.hasMore || state.nextBefore === null || state.isLoadingHistory) return
-
-  const previousHeight = messageListRef.value?.getScrollHeight() ?? 0
-  state.isLoadingHistory = true
-
-  try {
-    const page = await fetchMessagePage(sessionId.value, state.nextBefore)
-    state.messages = [...page.items.map(normalizeMessage), ...state.messages]
-    state.nextBefore = page.next_before
-    state.hasMore = page.has_more
-    await nextTick()
-    messageListRef.value?.restoreScrollAfterPrepend(previousHeight)
-  } catch (error) {
-    globalError.value = error instanceof Error ? error.message : '加载更早消息失败'
-  } finally {
-    state.isLoadingHistory = false
-  }
-}
-
-async function fetchMessagePage(id: string, before?: number): Promise<MessagePage> {
-  const params = new URLSearchParams({ limit: '20' })
-  if (before !== undefined) params.set('before', String(before))
-  return await fetchJson<MessagePage>(`/sessions/${encodeURIComponent(id)}/messages?${params}`)
-}
-
-async function loadContextUsage(id: string) {
-  const state = ensureSessionState(id)
-  try {
-    const usage = await fetchJson<ContextUsageEvent>(`/sessions/${encodeURIComponent(id)}/context-usage`)
-    state.contextUsage = usage
-    state.pruningEvents = []
-    for (const event of usage.pruning_records ?? []) {
-      upsertPruningEvent(state, event)
-    }
-  } catch {
-    state.contextUsage = undefined
-    state.pruningEvents = []
-  }
-}
-
-async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init)
-  const contentType = response.headers.get('content-type') ?? ''
-
-  if (!response.ok) {
-    throw new Error(`请求失败：${response.status} ${url}`)
-  }
-
-  if (!contentType.includes('application/json')) {
-    throw new Error(`接口没有返回 JSON：${url}`)
-  }
-
-  return await response.json() as T
-}
-
-function normalizeMessage(message: Message): Message {
-  return {
-    ...message,
-    toolPairs: message.toolPairs ?? [],
-  }
-}
-
-function sendMessage() {
-  const text = inputText.value.trim()
-  if (!text || !ws || ws.readyState !== WebSocket.OPEN || !sessionId.value) return
-
-  const state = ensureSessionState(sessionId.value)
-  globalError.value = ''
-  state.messages.push({ role: 'user', content: text })
-  inputText.value = ''
-  messageListRef.value?.scrollToBottom()
-
-  ws.send(JSON.stringify({
-    type: 'chat',
-    session_id: sessionId.value,
-    message: text,
-  }))
-}
-
-function handleEvent(event: StreamEvent) {
-  const eventSessionId = event.session_id || sessionId.value
-  if (!eventSessionId) return
-  const state = ensureSessionState(eventSessionId)
-
-  switch (event.type) {
-    case 'queued':
-      state.queuedCount = event.queued_count ?? state.queuedCount
-      ensureAssistantForRun(state, event.run_id, 'queued')
-      scrollIfActive(eventSessionId)
-      break
-
-    case 'run_started': {
-      const message = ensureAssistantForRun(state, event.run_id, 'running')
-      message.status = 'running'
-      state.activeRunId = event.run_id ?? ''
-      state.isProcessing = true
-      scrollIfActive(eventSessionId)
-      break
-    }
-
-    case 'queue_updated':
-      state.activeRunId = event.running_run_id ?? ''
-      state.queuedCount = event.queued_count ?? 0
-      state.isProcessing = Boolean(state.activeRunId)
-      break
-
-    case 'text':
-      ensureAssistantForRun(state, event.run_id, 'running').content += event.content ?? ''
-      scrollIfActive(eventSessionId)
-      break
-
-    case 'reasoning':
-      {
-        const message = ensureAssistantForRun(state, event.run_id, 'running')
-        message.reasoning = `${message.reasoning ?? ''}${event.content ?? ''}`
-      }
-      scrollIfActive(eventSessionId)
-      break
-
-    case 'context_compression':
-      {
-        const message = ensureAssistantForRun(state, event.run_id, 'running')
-        message.compressionEvents = message.compressionEvents ?? []
-        message.compressionEvents.push({
-          stage: event.stage ?? '',
-          reason: event.reason,
-          detail: event.detail,
-          estimated_tokens: event.estimated_tokens,
-          trigger_tokens: event.trigger_tokens,
-          target_tokens: event.target_tokens,
-          head_messages: event.head_messages,
-          tail_messages: event.tail_messages,
-          covered_messages: event.covered_messages,
-          summary_tokens: event.summary_tokens,
-          estimated_tokens_after: event.estimated_tokens_after,
-        })
-      }
-      scrollIfActive(eventSessionId)
-      break
-
-    case 'context_usage':
-      state.contextUsage = {
-        stage: event.stage ?? '',
-        reason: event.reason,
-        estimated_tokens: event.estimated_tokens,
-        trigger_tokens: event.trigger_tokens,
-        target_tokens: event.target_tokens,
-        model_messages: event.model_messages,
-        history_messages: event.history_messages,
-        compacted: event.compacted,
-        cache_hit: event.cache_hit,
-        covered_messages: event.covered_messages,
-        summary_tokens: event.summary_tokens,
-        system_tokens: event.system_tokens,
-        summary_tokens_breakdown: event.summary_tokens_breakdown,
-        user_tokens: event.user_tokens,
-        assistant_tokens: event.assistant_tokens,
-        tool_tokens: event.tool_tokens,
-      }
-      break
-
-    case 'context_pruning':
-      upsertPruningEvent(state, {
-        stage: event.stage ?? '',
-        reason: event.reason,
-        prune_id: event.prune_id,
-        tool_name: event.tool_name,
-        tool_call_id: event.tool_call_id,
-        original_tokens: event.original_tokens,
-        retained_tokens: event.retained_tokens,
-        omitted_tokens: event.omitted_tokens,
-        message_index: event.message_index,
-      })
-      break
-
-    case 'tool_call':
-      if (!event.run_id) return
-      state.pendingToolCalls[event.run_id] = {
-        name: event.name ?? '',
-        arguments: event.arguments ?? '',
-      }
-      scrollIfActive(eventSessionId)
-      break
-
-    case 'tool_result':
-      if (event.run_id && state.pendingToolCalls[event.run_id]) {
-        const message = ensureAssistantForRun(state, event.run_id, 'running')
-        message.toolPairs = message.toolPairs ?? []
-        message.toolPairs.push({
-          call: state.pendingToolCalls[event.run_id],
-          result: event.result ?? '',
-        })
-        delete state.pendingToolCalls[event.run_id]
-        scrollIfActive(eventSessionId)
-      }
-      break
-
-    case 'done':
-      ensureAssistantForRun(state, event.run_id, 'done').status = 'done'
-      void loadSessions()
-      break
-
-    case 'cancelled': {
-      const message = ensureAssistantForRun(state, event.run_id, 'cancelled')
-      message.status = 'cancelled'
-      if (!message.content) message.content = '[已停止生成]'
-      scrollIfActive(eventSessionId)
-      break
-    }
-
-    case 'queue_cleared':
-      state.queuedCount = 0
-      markQueuedMessagesCancelled(state, '[已从队列移除]')
-      break
-
-    case 'session_stopped':
-      state.queuedCount = 0
-      state.isProcessing = false
-      state.activeRunId = ''
-      markQueuedMessagesCancelled(state, '[已停止]')
-      break
-
-    case 'error':
-      state.messages.push({
-        role: 'assistant',
-        content: event.error || event.message || '未知错误',
-        isError: true,
-        runId: event.run_id,
-        status: 'error',
-      })
-      scrollIfActive(eventSessionId)
-      void loadSessions()
-      break
-  }
-}
 
 function cancelCurrentRun() {
   sendControl('cancel_current')
@@ -622,74 +287,6 @@ function clearActiveQueue() {
 
 function stopActiveSession() {
   sendControl('stop_session')
-}
-
-function sendControl(type: 'cancel_current' | 'clear_queue' | 'stop_session') {
-  if (!ws || ws.readyState !== WebSocket.OPEN || !sessionId.value) return
-  ws.send(JSON.stringify({ type, session_id: sessionId.value }))
-}
-
-function createRuntimeState(): SessionRuntimeState {
-  return {
-    messages: [],
-    isProcessing: false,
-    pendingToolCalls: {},
-    activeRunId: '',
-    queuedCount: 0,
-    contextUsage: undefined,
-    pruningEvents: [],
-    nextBefore: null,
-    hasMore: false,
-    isLoadingHistory: false,
-    hasLoadedHistory: false,
-  }
-}
-
-function ensureSessionState(id: string): SessionRuntimeState {
-  if (!sessionStates.value[id]) {
-    sessionStates.value[id] = createRuntimeState()
-  }
-  return sessionStates.value[id]
-}
-
-function ensureAssistantForRun(state: SessionRuntimeState, runId?: string, status: Message['status'] = 'running'): Message {
-  const normalizedRunId = runId || state.activeRunId || 'unknown'
-  let message = state.messages.find((item) => item.role === 'assistant' && item.runId === normalizedRunId)
-  if (!message) {
-    message = { role: 'assistant', content: '', toolPairs: [], runId: normalizedRunId, status }
-    state.messages.push(message)
-  }
-  message.status = status
-  return message
-}
-
-function upsertPruningEvent(state: SessionRuntimeState, event: ContextPruningEvent) {
-  const key = pruningEventKey(event)
-  const existingIndex = state.pruningEvents.findIndex((item) => pruningEventKey(item) === key)
-  if (existingIndex >= 0) {
-    state.pruningEvents.splice(existingIndex, 1, event)
-    return
-  }
-  state.pruningEvents.push(event)
-}
-
-function pruningEventKey(event: ContextPruningEvent) {
-  return event.prune_id || `${event.tool_call_id || 'tool'}-${event.message_index ?? 'unknown'}`
-}
-
-function markQueuedMessagesCancelled(state: SessionRuntimeState, content: string) {
-  for (const message of state.messages) {
-    if (message.role === 'assistant' && message.status === 'queued') {
-      message.status = 'cancelled'
-      message.content = content
-    }
-  }
-}
-
-function scrollIfActive(id: string) {
-  if (id === sessionId.value) {
-    messageListRef.value?.scrollToBottom()
-  }
 }
 
 function formatTokens(value?: number): string {
@@ -704,10 +301,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  shouldReconnect = false
-  if (ws) {
-    ws.close()
-  }
+  dispose()
 })
 </script>
 
@@ -1140,6 +734,35 @@ onUnmounted(() => {
   color: var(--text-secondary);
   font-size: 14px;
   line-height: 1.65;
+}
+
+.permission-note {
+  margin: 12px 0 0;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.permission-modal .delete-icon {
+  background: linear-gradient(135deg, #dbeafe, #bfdbfe);
+  color: #1d4ed8;
+}
+
+.permission-actions {
+  flex-wrap: wrap;
+}
+
+.permission-arguments {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: #0f172a;
+  color: #dbeafe;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .modal-actions {

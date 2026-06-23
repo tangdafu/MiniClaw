@@ -1,8 +1,9 @@
-import os
 import locale
+import os
 import re
 import subprocess
 
+from ..react_context import ToolExecutionContext
 from ..types import Tool
 
 
@@ -13,10 +14,18 @@ class CommandRunner:
     def __init__(self, timeout: int = 30):
         self.timeout = timeout
 
-    async def run(self, command: str, workdir: str | None = None) -> str:
+    async def run(self, command: str, workdir: str | None = None, context: ToolExecutionContext | None = None) -> str:
         validation_error = self.validate(command, workdir)
         if validation_error:
             return validation_error
+
+        if context is not None:
+            trace = dict(context.trace)
+            commands = list(trace.get("commands", []))
+            commands.append({"command": command, "workdir": workdir or os.getcwd()})
+            trace["commands"] = commands
+            context.trace.clear()
+            context.trace.update(trace)
 
         try:
             cwd = workdir or os.getcwd()
@@ -74,5 +83,8 @@ def get_command_tools(runner: CommandRunner) -> list[Tool]:
                 "required": ["command"],
             },
             handler=runner.run,
+            category="command",
+            risk_level="high",
+            execution_policy="confirm",
         ),
     ]

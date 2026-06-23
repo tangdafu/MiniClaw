@@ -1,7 +1,7 @@
-import fnmatch
 import re
 from pathlib import Path
 
+from ..react_context import ToolExecutionContext
 from ..types import Tool
 
 
@@ -80,16 +80,24 @@ class FileTools:
             return "未找到匹配内容"
         return "\n".join(results)
 
-    def write_file(self, path: str, content: str) -> str:
+    def write_file(self, path: str, content: str, context: ToolExecutionContext | None = None) -> str:
         target = self._resolve(path)
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
         except Exception as exc:
             return f"[错误] 写入文件失败: {exc}"
+        self._record_changed_file(context, target)
         return f"已写入文件: {path}"
 
-    def replace_text(self, path: str, old_text: str, new_text: str, replace_all: bool = False) -> str:
+    def replace_text(
+        self,
+        path: str,
+        old_text: str,
+        new_text: str,
+        replace_all: bool = False,
+        context: ToolExecutionContext | None = None,
+    ) -> str:
         target = self._resolve(path)
         if not target.exists():
             return f"[错误] 文件不存在: {path}"
@@ -113,6 +121,7 @@ class FileTools:
         except Exception as exc:
             return f"[错误] 写入文件失败: {exc}"
 
+        self._record_changed_file(context, target)
         replaced = count if replace_all else 1
         return f"已替换 {replaced} 处文本: {path}"
 
@@ -121,6 +130,19 @@ class FileTools:
         if target.is_absolute():
             return target
         return self.base_dir / target
+
+    def _record_changed_file(self, context: ToolExecutionContext | None, target: Path) -> None:
+        if context is None:
+            return
+        changed_files = list(context.trace.get("changed_files", []))
+        try:
+            path_value = str(target.relative_to(self.base_dir))
+        except ValueError:
+            path_value = str(target)
+        if path_value in changed_files:
+            return
+        changed_files.append(path_value)
+        context.trace["changed_files"] = changed_files
 
     def _positive_limit(self, value: int, default: int) -> int:
         try:
@@ -137,7 +159,7 @@ class FileTools:
         return b"\0" in chunk
 
 
-def get_file_tools(file_tools: FileTools) -> list[Tool]:
+def get_read_only_file_tools(file_tools: FileTools) -> list[Tool]:
     return [
         Tool(
             name="read_file",
@@ -151,6 +173,9 @@ def get_file_tools(file_tools: FileTools) -> list[Tool]:
                 "required": ["path"],
             },
             handler=file_tools.read_file,
+            category="file",
+            risk_level="low",
+            execution_policy="auto",
         ),
         Tool(
             name="list_files",
@@ -164,6 +189,9 @@ def get_file_tools(file_tools: FileTools) -> list[Tool]:
                 "required": [],
             },
             handler=file_tools.list_files,
+            category="file",
+            risk_level="low",
+            execution_policy="auto",
         ),
         Tool(
             name="search_text",
@@ -179,7 +207,15 @@ def get_file_tools(file_tools: FileTools) -> list[Tool]:
                 "required": ["pattern"],
             },
             handler=file_tools.search_text,
+            category="file",
+            risk_level="low",
+            execution_policy="auto",
         ),
+    ]
+
+
+def get_mutating_file_tools(file_tools: FileTools) -> list[Tool]:
+    return [
         Tool(
             name="write_file",
             description="写入本地文本文件，会创建缺失的父目录并覆盖已有文件内容。",
@@ -192,6 +228,9 @@ def get_file_tools(file_tools: FileTools) -> list[Tool]:
                 "required": ["path", "content"],
             },
             handler=file_tools.write_file,
+            category="file",
+            risk_level="medium",
+            execution_policy="confirm",
         ),
         Tool(
             name="replace_text",
@@ -207,5 +246,15 @@ def get_file_tools(file_tools: FileTools) -> list[Tool]:
                 "required": ["path", "old_text", "new_text"],
             },
             handler=file_tools.replace_text,
+            category="file",
+            risk_level="medium",
+            execution_policy="confirm",
         ),
+    ]
+
+
+def get_file_tools(file_tools: FileTools) -> list[Tool]:
+    return [
+        *get_read_only_file_tools(file_tools),
+        *get_mutating_file_tools(file_tools),
     ]

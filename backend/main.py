@@ -23,7 +23,7 @@ from miniclaw.session_history import (
 )
 from miniclaw.system_prompt import build_default_system_prompt
 from miniclaw.types import Event
-from tools import get_tools
+from miniclaw.tools import get_builtin_tools
 
 # 配置日志
 logging.basicConfig(
@@ -63,10 +63,12 @@ async def lifespan(app: FastAPI):
             skills_dir=backend_dir / "skills",
         ),
     )
-    agent = Agent(config=config, tools=get_tools())
+    agent = Agent(config=config, tools=get_builtin_tools(skills_dir=backend_dir / "skills"))
 
     # 初始化 Claw（编排层）
     _claw = Claw(agent=agent)
+    agent.runtime.request_tool_permission = _claw.request_tool_permission
+    agent.runtime.get_session_tool_policy = _claw.get_session_tool_policy
     logger.info("Claw initialized with %d tools", len(agent.tools))
 
     yield
@@ -139,6 +141,21 @@ async def websocket_chat(
                 await claw.stop_session(session_id, emit)
                 continue
 
+            if command == "respond_tool_permission":
+                resolved = claw.respond_tool_permission(
+                    session_id,
+                    data.get("request_id", ""),
+                    data.get("decision", "deny_once"),
+                )
+                await emit({
+                    "type": "tool_permission_decision",
+                    "session_id": session_id,
+                    "resolved": resolved,
+                    "request_id": data.get("request_id", ""),
+                    "permission_decision": data.get("decision", "deny_once"),
+                })
+                continue
+
             await emit({"type": "error", "session_id": session_id, "error": f"Unknown command: {command}"})
 
     sender_task = asyncio.create_task(sender())
@@ -201,6 +218,16 @@ async def get_session_context_usage(session_id: str, claw: Claw = Depends(get_cl
     if not claw.session_manager.session_exists(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
     return claw.get_context_usage(session_id)
+
+
+@app.get("/sessions/{session_id}/runs/{run_id}")
+async def get_run_summary(session_id: str, run_id: str, claw: Claw = Depends(get_claw)):
+    if not claw.session_manager.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    summary = claw.get_run_summary(session_id, run_id)
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Run summary not found")
+    return summary
 
 
 @app.delete("/sessions/{session_id}")

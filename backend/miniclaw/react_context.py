@@ -1,8 +1,29 @@
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+import asyncio
 
 from .types import Tool
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@dataclass
+class RunSummary:
+    run_id: str
+    session_id: str | None
+    status: Literal["running", "done", "cancelled", "error"] = "running"
+    started_at: str = field(default_factory=utc_now_iso)
+    finished_at: str | None = None
+    tool_calls_total: int = 0
+    tool_calls_blocked: int = 0
+    changed_files: list[str] = field(default_factory=list)
+    summary_text: str | None = None
+    last_error: str | None = None
+    commands: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -54,6 +75,11 @@ class ToolExecution:
     error: str | None = None
     session_id: str | None = None
     run_id: str | None = None
+    started_at: str = field(default_factory=utc_now_iso)
+    finished_at: str | None = None
+    decision: str = "allow"
+    blocked_reason: str | None = None
+    changed_files: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -65,3 +91,4 @@ class ToolExecutionContext:
     cancelled: bool = False
     permissions: dict[str, Any] = field(default_factory=dict)
     trace: dict[str, Any] = field(default_factory=dict)
+    cancel_event: asyncio.Event | None = None

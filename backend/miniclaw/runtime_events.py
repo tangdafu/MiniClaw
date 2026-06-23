@@ -1,3 +1,10 @@
+"""Deprecated runtime event definitions.
+
+This module is currently not used by the active MiniClaw runtime pipeline.
+Keep it only as a temporary placeholder until the event model is either
+fully adopted or removed in a later cleanup wave.
+"""
+
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
